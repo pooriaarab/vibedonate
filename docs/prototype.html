@@ -1,0 +1,897 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vibedonate — mesh node</title>
+<style>
+  :root{
+    --bg: #090b10;
+    --bg-panel: #11141b;
+    --bg-panel-raised: #151924;
+    --line: rgba(255,255,255,0.08);
+    --line-strong: rgba(255,255,255,0.14);
+    --text: #e8ecf3;
+    --text-dim: #93a1ba;
+    --text-faint: #5d6a82;
+    --give: #57d9c4;
+    --give-dim: rgba(87,217,196,0.35);
+    --get: #b592ff;
+    --get-dim: rgba(181,146,255,0.35);
+    --verified: #4ade80;
+    --pending: #f2b25a;
+    --danger: #f2716b;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+
+  *{ box-sizing: border-box; }
+  html,body{ height:100%; }
+  body{
+    margin:0;
+    background:
+      radial-gradient(1100px 700px at 18% -8%, rgba(87,217,196,0.05), transparent 60%),
+      radial-gradient(900px 600px at 100% 10%, rgba(181,146,255,0.05), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    min-height:100%;
+  }
+
+  ::selection{ background: rgba(87,217,196,0.25); }
+
+  a{ color: inherit; }
+
+  button{ font-family: inherit; }
+
+  /* ---------- shell ---------- */
+  .shell{
+    max-width: 1360px;
+    margin: 0 auto;
+    padding: 28px 32px 64px;
+  }
+
+  header.top{
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap: 24px;
+    padding-bottom: 22px;
+    margin-bottom: 26px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .brand{
+    display:flex;
+    flex-direction:column;
+    gap: 4px;
+  }
+  .brand .mark{
+    font-size: 1.5rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    color: var(--text);
+  }
+  .brand .suite{
+    font-size: 0.82rem;
+    color: var(--text-faint);
+  }
+  .brand .suite b{ color: var(--text-dim); font-weight: 550; }
+
+  .node-badge{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding: 9px 14px;
+    background: var(--bg-panel);
+    border: 1px solid var(--line-strong);
+    border-radius: 100px;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    box-shadow: 0 8px 24px -14px rgba(0,0,0,0.7);
+    white-space: nowrap;
+  }
+  .node-badge .dot{
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--give);
+    box-shadow: 0 0 0 3px rgba(87,217,196,0.16);
+    animation: dot-breathe 2.6s ease-in-out infinite;
+  }
+  .shell.armed-off .node-badge .dot{
+    background: var(--text-faint);
+    box-shadow: none;
+    animation: none;
+  }
+  .node-badge .id{ font-family: var(--mono); color: var(--text); }
+
+  @keyframes dot-breathe{
+    0%,100%{ box-shadow: 0 0 0 3px rgba(87,217,196,0.16); }
+    50%{ box-shadow: 0 0 0 6px rgba(87,217,196,0.05); }
+  }
+
+  /* ---------- layout ---------- */
+  .grid{
+    display:grid;
+    grid-template-columns: 300px minmax(0,1fr) 320px;
+    gap: 20px;
+    align-items:start;
+  }
+  @media (max-width: 1180px){
+    .grid{ grid-template-columns: 1fr; }
+  }
+
+  .col{ display:flex; flex-direction:column; gap:20px; min-width:0; }
+
+  .panel{
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 20px;
+  }
+
+  .panel h2{
+    font-size: 0.92rem;
+    font-weight: 600;
+    margin: 0 0 4px;
+    color: var(--text);
+  }
+  .panel .sub{
+    font-size: 0.8rem;
+    color: var(--text-faint);
+    margin: 0 0 16px;
+    line-height:1.5;
+  }
+
+  .row{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+
+  /* ---------- toggle switch ---------- */
+  .switch{
+    position:relative;
+    width: 42px; height: 24px;
+    flex: none;
+  }
+  .switch input{ position:absolute; opacity:0; inset:0; margin:0; cursor:pointer; }
+  .switch .track{
+    position:absolute; inset:0;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid var(--line-strong);
+    border-radius: 100px;
+    transition: background 0.25s ease, border-color 0.25s ease;
+  }
+  .switch .thumb{
+    position:absolute; top: 2px; left: 2px;
+    width: 18px; height: 18px;
+    border-radius:50%;
+    background: var(--text-dim);
+    transition: transform 0.25s cubic-bezier(.2,.8,.2,1), background 0.25s ease;
+  }
+  .switch input:checked + .track{
+    background: rgba(87,217,196,0.18);
+    border-color: rgba(87,217,196,0.5);
+  }
+  .switch input:checked + .track + .thumb{
+    transform: translateX(18px);
+    background: var(--give);
+  }
+  .switch input:focus-visible + .track{
+    outline: 2px solid var(--give);
+    outline-offset: 2px;
+  }
+
+  .master-status{
+    font-size: 0.78rem;
+    color: var(--text-faint);
+    margin-top: 10px;
+    font-family: var(--mono);
+  }
+  .master-status .n{ color: var(--give); }
+  .shell.armed-off .master-status .n{ color: var(--text-faint); }
+
+  fieldset{ border:0; margin:0; padding:0; }
+  fieldset[disabled]{ opacity: 0.4; pointer-events: none; }
+
+  .stack{ display:flex; flex-direction:column; gap:18px; margin-top:18px; }
+
+  .field-label{
+    display:block;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+
+  /* time inputs */
+  .time-row{ display:flex; align-items:center; gap:10px; }
+  .time-row input[type="time"]{
+    background: var(--bg-panel-raised);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    padding: 6px 8px;
+    color-scheme: dark;
+  }
+  .time-row span{ color: var(--text-faint); font-size: 0.8rem; }
+
+  .hour-strip{
+    display:grid;
+    grid-template-columns: repeat(24, 1fr);
+    gap: 2px;
+    margin-top: 10px;
+  }
+  .hour-strip i{
+    display:block;
+    height: 14px;
+    border-radius: 2px;
+    background: rgba(255,255,255,0.06);
+    font-style: normal;
+    transition: background 0.2s ease;
+  }
+  .hour-strip i.idle{ background: var(--give); opacity: 0.55; }
+  .hour-strip-labels{
+    display:flex; justify-content:space-between;
+    font-size: 0.68rem; color: var(--text-faint);
+    margin-top: 5px; font-family: var(--mono);
+  }
+
+  /* slider */
+  .cap-value{ font-family: var(--mono); font-size: 0.85rem; color: var(--text); }
+  input[type="range"]{
+    width: 100%;
+    appearance: none;
+    height: 4px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.1);
+    margin-top: 12px;
+  }
+  input[type="range"]::-webkit-slider-thumb{
+    appearance:none;
+    width:16px; height:16px; border-radius:50%;
+    background: var(--give);
+    border: 3px solid #06110f;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+    cursor:pointer;
+  }
+  input[type="range"]::-moz-range-thumb{
+    width:16px; height:16px; border-radius:50%;
+    background: var(--give);
+    border: 3px solid #06110f;
+    cursor:pointer;
+  }
+  input[type="range"]:focus-visible{ outline: 2px solid var(--give); outline-offset: 4px; }
+
+  /* checkboxes */
+  .check-list{ display:flex; flex-direction:column; gap:10px; }
+  .check-row{
+    display:flex; align-items:flex-start; gap:10px;
+    font-size: 0.85rem; color: var(--text-dim);
+    cursor:pointer;
+  }
+  .check-row input{ margin-top: 3px; accent-color: var(--give); }
+  .check-row .detail{
+    display:block;
+    font-size: 0.75rem;
+    color: var(--text-faint);
+    margin-top: 3px;
+    font-family: var(--mono);
+  }
+
+  /* radios */
+  .radio-list{ display:flex; flex-direction:column; gap:12px; }
+  .radio-opt{
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 12px 14px;
+    transition: border-color 0.2s ease, background 0.2s ease;
+  }
+  .radio-opt.active{
+    border-color: rgba(181,146,255,0.4);
+    background: rgba(181,146,255,0.06);
+  }
+  .radio-opt label{
+    display:flex; align-items:center; gap:10px;
+    font-size: 0.85rem; color: var(--text);
+    cursor:pointer;
+  }
+  .radio-opt label .ex{ color: var(--text-faint); font-weight: 400; }
+  .radio-opt input[type="radio"]{ accent-color: var(--get); }
+  .radio-detail{ margin-top: 10px; display:none; }
+  .radio-opt.active .radio-detail{ display:block; }
+  .radio-detail input[type="text"]{
+    width: 100%;
+    background: var(--bg-panel-raised);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 0.82rem;
+    padding: 7px 10px;
+  }
+  .chips{ display:flex; flex-wrap:wrap; gap: 6px; margin-bottom: 8px; }
+  .chip{
+    display:flex; align-items:center; gap:6px;
+    background: var(--bg-panel-raised);
+    border: 1px solid var(--line-strong);
+    border-radius: 100px;
+    padding: 4px 6px 4px 10px;
+    font-size: 0.76rem;
+    font-family: var(--mono);
+    color: var(--text-dim);
+  }
+  .chip button{
+    background:none; border:none; color: var(--text-faint);
+    cursor:pointer; font-size: 0.85rem; line-height:1;
+    padding: 2px 4px;
+    border-radius: 50%;
+  }
+  .chip button:hover{ color: var(--danger); }
+
+  /* ---------- mesh panel ---------- */
+  .mesh-panel{ display:flex; flex-direction:column; }
+  .mesh-panel .legend{
+    display:flex; flex-wrap:wrap; gap: 16px;
+    margin-top: 14px;
+    font-size: 0.74rem; color: var(--text-faint);
+  }
+  .legend .item{ display:flex; align-items:center; gap:7px; }
+  .legend .swatch{ width:16px; height:2px; border-radius:2px; }
+  .legend .swatch.give{ background: var(--give); }
+  .legend .swatch.get{ background: var(--get); }
+  .legend .swatch.pending{ background: repeating-linear-gradient(90deg, var(--pending) 0 4px, transparent 4px 8px); }
+  .legend .swatch.mesh{ background: rgba(255,255,255,0.18); }
+
+  svg#mesh{ width:100%; height:auto; display:block; }
+
+  .edge{ fill:none; stroke-linecap:round; }
+  .edge.give{ stroke: var(--give-dim); stroke-width: 1.4; }
+  .edge.get{ stroke: var(--get-dim); stroke-width: 1.4; }
+  .edge.mesh{ stroke: rgba(255,255,255,0.09); stroke-width: 1; }
+  .edge.pending{ stroke: var(--pending); stroke-opacity: 0.4; stroke-width: 1.3; stroke-dasharray: 4 5; }
+  .edge.pending.approved{ stroke-dasharray: none; stroke: var(--give-dim); }
+
+  .packet{ r: 2.6px; }
+  .packet.give{ fill: var(--give); filter: drop-shadow(0 0 4px rgba(87,217,196,0.9)); }
+  .packet.get{ fill: var(--get); filter: drop-shadow(0 0 4px rgba(181,146,255,0.9)); }
+  .packet.mesh{ fill: rgba(255,255,255,0.55); }
+  .packet.pending-flow{ opacity: 0; }
+  .packet.pending-flow.on{ opacity: 1; }
+
+  @keyframes flow-a{ from{ offset-distance: 0%; } to{ offset-distance: 100%; } }
+
+  .node-circle{ stroke-width: 1.4; transition: opacity 0.4s ease; }
+  .node-circle.you{ fill: #0d2b26; stroke: var(--give); stroke-width: 2; }
+  .node-circle.peer{ fill: var(--bg-panel-raised); stroke: var(--line-strong); }
+  .node-circle.peer.verified{ stroke: rgba(74,222,128,0.55); }
+  .node-circle.peer.unverified{ stroke: var(--text-faint); stroke-dasharray: 2 3; }
+  .node-glow{ fill: none; stroke: var(--give); stroke-opacity: 0.35; }
+  .shell.armed-off .node-glow{ stroke-opacity: 0.08; }
+  .shell.armed-off .packet.give{ opacity: 0; }
+  #youPulse{
+    transform-origin: 460px 300px;
+    animation: you-pulse 2.6s ease-in-out infinite;
+  }
+  @keyframes you-pulse{
+    0%,100%{ r: 30; stroke-opacity: 0.28; }
+    50%{ r: 40; stroke-opacity: 0; }
+  }
+
+  .node-label{
+    font-family: var(--mono);
+    font-size: 11px;
+    fill: var(--text-faint);
+  }
+  .node-label.you{ fill: var(--text); font-weight: 600; }
+  .node-tick{ font-size: 12px; fill: var(--verified); }
+
+  /* ---------- metering ---------- */
+  .meter-grid{ display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px; }
+  .meter-stat .label{ font-size: 0.74rem; color: var(--text-faint); margin-bottom:4px; }
+  .meter-stat .value{ font-family: var(--mono); font-size: 1.35rem; letter-spacing: -0.01em; }
+  .meter-stat .value.give{ color: var(--give); }
+  .meter-stat .value.get{ color: var(--get); }
+  .meter-stat .unit{ font-size: 0.7rem; color: var(--text-faint); font-weight:400; }
+
+  .meter-bar-wrap{ margin-bottom: 16px; }
+  .meter-bar-labels{
+    display:flex; justify-content:space-between;
+    font-size: 0.72rem; color: var(--text-faint);
+    margin-bottom: 6px; font-family: var(--mono);
+  }
+  .meter-bar{
+    height: 8px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.07);
+    overflow:hidden;
+  }
+  .meter-bar .fill{
+    height:100%;
+    background: linear-gradient(90deg, var(--give), #7ee9d9);
+    border-radius: 4px;
+    transition: width 0.6s cubic-bezier(.2,.8,.2,1);
+  }
+
+  .streak-row{
+    display:flex; align-items:baseline; gap:8px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    font-size: 0.82rem; color: var(--text-dim);
+  }
+  .streak-row .n{ font-family: var(--mono); font-size: 1.05rem; color: var(--text); }
+  .streak-row .best{ color: var(--text-faint); font-size: 0.76rem; margin-left:auto; }
+
+  /* ---------- trust panel ---------- */
+  .peer-table{ display:flex; flex-direction:column; }
+  .peer-row{
+    display:flex; align-items:center; gap:10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 0.8rem;
+  }
+  .peer-row:last-child{ border-bottom:none; }
+  .peer-row .handle{ font-family: var(--mono); color: var(--text-dim); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .peer-row .rep{ font-family: var(--mono); font-size: 0.78rem; color: var(--text-faint); }
+  .peer-row .tag{
+    font-size: 0.68rem;
+    padding: 2px 7px;
+    border-radius: 100px;
+  }
+  .peer-row .tag.verified{ color: var(--verified); background: rgba(74,222,128,0.12); }
+  .peer-row .tag.unverified{ color: var(--text-faint); background: rgba(255,255,255,0.05); }
+
+  .guards{ list-style:none; margin: 14px 0 0; padding: 0; display:flex; flex-direction:column; gap:8px; }
+  .guards li{
+    font-size: 0.78rem; color: var(--text-dim);
+    padding-left: 14px;
+    position:relative;
+  }
+  .guards li::before{
+    content:'';
+    position:absolute; left:0; top: 0.55em;
+    width:4px; height:4px; border-radius:50%;
+    background: var(--text-faint);
+  }
+  .guards li b{ color: var(--text); font-weight:600; }
+
+  .request-card{
+    margin-top: 16px;
+    padding: 14px;
+    background: rgba(242,178,90,0.06);
+    border: 1px solid rgba(242,178,90,0.28);
+    border-radius: 10px;
+  }
+  .request-card .title{ font-size: 0.82rem; color: var(--text); margin-bottom:4px; }
+  .request-card .title .h{ font-family: var(--mono); color: var(--pending); }
+  .request-card .desc{ font-size: 0.76rem; color: var(--text-faint); line-height:1.5; margin-bottom: 12px; }
+  .request-actions{ display:flex; gap:8px; }
+  .btn{
+    flex:1;
+    font-size: 0.78rem;
+    padding: 7px 0;
+    border-radius: 8px;
+    border: 1px solid var(--line-strong);
+    background: var(--bg-panel-raised);
+    color: var(--text-dim);
+    cursor:pointer;
+    transition: transform 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .btn:hover{ transform: translateY(-1px); }
+  .btn.approve:hover{ border-color: var(--give); color: var(--give); }
+  .btn.deny:hover{ border-color: var(--danger); color: var(--danger); }
+  .btn:focus-visible{ outline: 2px solid var(--give); outline-offset: 2px; }
+
+  .resolved-note{
+    margin-top: 16px;
+    font-size: 0.78rem;
+    color: var(--text-faint);
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    display:none;
+  }
+  .resolved-note.show{ display:block; }
+  .resolved-note b{ color: var(--text-dim); }
+
+  @media (prefers-reduced-motion: reduce){
+    .packet{ animation-duration: 12s !important; }
+    .node-badge .dot{ animation: none; }
+  }
+</style>
+</head>
+<body>
+<div class="shell" id="shell">
+
+  <header class="top">
+    <div class="brand">
+      <div class="mark">vibedonate</div>
+      <div class="suite">node dashboard · part of the <b>Vibe Suite</b> — inference mesh, bittorrent-style</div>
+    </div>
+    <div class="node-badge">
+      <span class="dot"></span>
+      <span>your machine</span>
+      <span class="id">·</span>
+      <span id="badgeState">opt-in</span>
+    </div>
+  </header>
+
+  <div class="grid">
+
+    <!-- LEFT: sharing controls -->
+    <div class="col">
+      <section class="panel">
+        <div class="row">
+          <h2>Share my spare capacity</h2>
+          <label class="switch">
+            <input type="checkbox" id="masterToggle" checked>
+            <span class="track"></span>
+            <span class="thumb"></span>
+          </label>
+        </div>
+        <p class="sub">Local-first. Nothing leaves this machine unless armed.</p>
+        <div class="master-status" id="masterStatus">armed — routing to <span class="n">3</span> peers</div>
+
+        <fieldset id="shareFields">
+          <div class="stack">
+            <div>
+              <label class="field-label">Idle hours only</label>
+              <div class="time-row">
+                <input type="time" id="idleStart" value="23:00">
+                <span>→</span>
+                <input type="time" id="idleEnd" value="07:00">
+              </div>
+              <div class="hour-strip" id="hourStrip"></div>
+              <div class="hour-strip-labels"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+            </div>
+
+            <div>
+              <div class="row"><label class="field-label" style="margin-bottom:0">Nightly cap</label><span class="cap-value" id="capValue">800,000 tok</span></div>
+              <input type="range" id="capSlider" min="100000" max="2000000" step="50000" value="800000">
+            </div>
+
+            <div>
+              <label class="field-label">Which capacity</label>
+              <div class="check-list">
+                <label class="check-row">
+                  <input type="checkbox" checked data-cap="sub">
+                  <span>Idle subscription hours <span class="detail">overnight, unused Pro/Max hours</span></span>
+                </label>
+                <label class="check-row">
+                  <input type="checkbox" data-cap="api">
+                  <span>Spare API credits <span class="detail">metered pay-as-you-go headroom</span></span>
+                </label>
+                <label class="check-row">
+                  <input type="checkbox" checked data-cap="local" id="localCap">
+                  <span>Local compute
+                    <span class="detail" id="localDetail">detected: 1 endpoint · llama.cpp on this machine</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </fieldset>
+      </section>
+
+      <section class="panel">
+        <h2>Recipients</h2>
+        <p class="sub">Who your spare capacity is allowed to reach.</p>
+        <div class="radio-list" id="recipientList">
+          <div class="radio-opt" data-opt="pool">
+            <label><input type="radio" name="recipient" value="pool"> an open pool <span class="ex">— anyone opted into the mesh</span></label>
+          </div>
+          <div class="radio-opt active" data-opt="org">
+            <label><input type="radio" name="recipient" value="org" checked> a specific org <span class="ex">— e.g. an AI research lab</span></label>
+            <div class="radio-detail">
+              <input type="text" value="Cascade Research Lab" placeholder="org name or domain">
+            </div>
+          </div>
+          <div class="radio-opt" data-opt="allow">
+            <label><input type="radio" name="recipient" value="allow"> an allow-list <span class="ex">— only handles you approve</span></label>
+            <div class="radio-detail">
+              <div class="chips" id="chipList">
+                <span class="chip">@kai-research <button data-remove>×</button></span>
+                <span class="chip">@lab-tessellate <button data-remove>×</button></span>
+                <span class="chip">@maya_infra <button data-remove>×</button></span>
+              </div>
+              <input type="text" id="chipInput" placeholder="add handle, press enter">
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- CENTER: mesh viz -->
+    <div class="col">
+      <section class="panel mesh-panel">
+        <h2>Mesh</h2>
+        <p class="sub">Your node's live position in the inference mesh.</p>
+        <svg id="mesh" viewBox="0 0 920 560" xmlns="http://www.w3.org/2000/svg">
+          <!-- static edges -->
+          <path class="edge give" d="M460,300 Q610,140 700,130"></path>
+          <path class="edge give" d="M460,300 Q680,240 830,320"></path>
+          <path class="edge get"  d="M630,480 Q560,420 460,300"></path>
+          <path class="edge get"  d="M230,470 Q330,420 460,300"></path>
+          <path class="edge mesh" d="M700,130 Q480,60 290,80"></path>
+          <path class="edge mesh" d="M110,250 Q170,380 230,470"></path>
+          <path class="edge pending" id="pendingEdge" d="M460,300 Q480,170 500,60"></path>
+
+          <!-- packets: donating (you -> peer) -->
+          <circle class="packet give" style="offset-path: path('M460,300 Q610,140 700,130'); animation: flow-a 2.6s linear infinite;"></circle>
+          <circle class="packet give" style="offset-path: path('M460,300 Q610,140 700,130'); animation: flow-a 2.6s linear infinite -0.9s;"></circle>
+          <circle class="packet give" style="offset-path: path('M460,300 Q610,140 700,130'); animation: flow-a 2.6s linear infinite -1.8s;"></circle>
+
+          <circle class="packet give" style="offset-path: path('M460,300 Q680,240 830,320'); animation: flow-a 2.2s linear infinite;"></circle>
+          <circle class="packet give" style="offset-path: path('M460,300 Q680,240 830,320'); animation: flow-a 2.2s linear infinite -1.1s;"></circle>
+
+          <!-- packets: receiving (peer -> you) -->
+          <circle class="packet get" style="offset-path: path('M630,480 Q560,420 460,300'); animation: flow-a 2.9s linear infinite;"></circle>
+          <circle class="packet get" style="offset-path: path('M630,480 Q560,420 460,300'); animation: flow-a 2.9s linear infinite -1.4s;"></circle>
+
+          <circle class="packet get" style="offset-path: path('M230,470 Q330,420 460,300'); animation: flow-a 3.2s linear infinite;"></circle>
+          <circle class="packet get" style="offset-path: path('M230,470 Q330,420 460,300'); animation: flow-a 3.2s linear infinite -1.6s;"></circle>
+
+          <!-- mesh-only faint packet, slow -->
+          <circle class="packet mesh" style="offset-path: path('M700,130 Q480,60 290,80'); animation: flow-a 6s linear infinite;"></circle>
+
+          <!-- pending edge packet, revealed on approve -->
+          <circle class="packet give pending-flow" id="pendingPacket1" style="offset-path: path('M460,300 Q480,170 500,60'); animation: flow-a 2.4s linear infinite;"></circle>
+          <circle class="packet give pending-flow" id="pendingPacket2" style="offset-path: path('M460,300 Q480,170 500,60'); animation: flow-a 2.4s linear infinite -1.2s;"></circle>
+
+          <!-- your node glow + circle -->
+          <circle class="node-glow" cx="460" cy="300" r="30"></circle>
+          <circle class="node-glow" cx="460" cy="300" r="30" id="youPulse"></circle>
+          <circle class="node-circle you" cx="460" cy="300" r="22"></circle>
+          <text class="node-label you" x="460" y="342" text-anchor="middle">you</text>
+
+          <!-- peers -->
+          <g>
+            <circle class="node-circle peer verified" cx="700" cy="130" r="15"><title>cascade-lab · reputation 97 · verified</title></circle>
+            <text class="node-tick" x="712" y="122">✓</text>
+            <text class="node-label" x="700" y="112" text-anchor="middle">cascade-lab</text>
+          </g>
+          <g>
+            <circle class="node-circle peer verified" cx="830" cy="320" r="15"><title>kai-research · reputation 88 · verified</title></circle>
+            <text class="node-tick" x="842" y="312">✓</text>
+            <text class="node-label" x="830" y="345" text-anchor="middle">kai-research</text>
+          </g>
+          <g>
+            <circle class="node-circle peer verified" cx="630" cy="480" r="15"><title>maya_infra · reputation 82 · verified</title></circle>
+            <text class="node-tick" x="642" y="472">✓</text>
+            <text class="node-label" x="630" y="505" text-anchor="middle">maya_infra</text>
+          </g>
+          <g>
+            <circle class="node-circle peer verified" cx="230" cy="470" r="15"><title>lab-tessellate · reputation 90 · verified</title></circle>
+            <text class="node-tick" x="242" y="462">✓</text>
+            <text class="node-label" x="230" y="495" text-anchor="middle">lab-tessellate</text>
+          </g>
+          <g>
+            <circle class="node-circle peer unverified" cx="110" cy="250" r="13"><title>anon-9f3a · reputation 41 · unverified — capacity withheld</title></circle>
+            <text class="node-label" x="110" y="278" text-anchor="middle">anon-9f3a</text>
+          </g>
+          <g>
+            <circle class="node-circle peer verified" cx="290" cy="80" r="13"><title>pool-node-14 · reputation 73 · verified · mesh-only, not connected to you</title></circle>
+            <text class="node-tick" x="302" y="72">✓</text>
+            <text class="node-label" x="290" y="60" text-anchor="middle">pool-node-14</text>
+          </g>
+          <g id="p7group">
+            <circle class="node-circle peer verified" cx="500" cy="60" r="14"><title>new-handle-77 · reputation 76 · verified · awaiting your approval</title></circle>
+            <text class="node-tick" x="512" y="52">✓</text>
+            <text class="node-label" x="500" y="42" text-anchor="middle">new-handle-77</text>
+          </g>
+        </svg>
+
+        <div class="legend">
+          <span class="item"><span class="swatch give"></span>donating (you → peer)</span>
+          <span class="item"><span class="swatch get"></span>receiving (peer → you)</span>
+          <span class="item"><span class="swatch pending"></span>pending approval</span>
+          <span class="item"><span class="swatch mesh"></span>mesh, not connected to you</span>
+        </div>
+      </section>
+    </div>
+
+    <!-- RIGHT: metering + trust -->
+    <div class="col">
+      <section class="panel">
+        <h2>Metering</h2>
+        <p class="sub">What's moved through this node today.</p>
+        <div class="meter-grid">
+          <div class="meter-stat">
+            <div class="label">donated today</div>
+            <div class="value give"><span id="donatedVal">428,000</span> <span class="unit">tok</span></div>
+          </div>
+          <div class="meter-stat">
+            <div class="label">received today</div>
+            <div class="value get"><span id="receivedVal">96,500</span> <span class="unit">tok</span></div>
+          </div>
+        </div>
+        <div class="meter-bar-wrap">
+          <div class="meter-bar-labels"><span>toward nightly cap</span><span id="meterPct">54%</span></div>
+          <div class="meter-bar"><div class="fill" id="meterFill" style="width:54%"></div></div>
+        </div>
+        <div class="streak-row">
+          <span>🔥</span>
+          <span class="n" id="streakVal">14</span>
+          <span>day streak</span>
+          <span class="best">best: 31</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Trust &amp; safety</h2>
+        <p class="sub">Capacity only routes to verified or allow-listed peers.</p>
+        <div class="peer-table">
+          <div class="peer-row"><span class="handle">@cascade-lab</span><span class="rep">97</span><span class="tag verified">verified</span></div>
+          <div class="peer-row"><span class="handle">@kai-research</span><span class="rep">88</span><span class="tag verified">verified</span></div>
+          <div class="peer-row"><span class="handle">@lab-tessellate</span><span class="rep">90</span><span class="tag verified">verified</span></div>
+          <div class="peer-row"><span class="handle">@maya_infra</span><span class="rep">82</span><span class="tag verified">verified</span></div>
+          <div class="peer-row"><span class="handle">@anon-9f3a</span><span class="rep">41</span><span class="tag unverified">withheld</span></div>
+        </div>
+
+        <ul class="guards">
+          <li><b>Rate cap:</b> 50 requests / min per peer</li>
+          <li><b>Auto-revoke:</b> after 3 failed integrity checks</li>
+          <li><b>Routing gate:</b> verified or allow-listed peers only</li>
+        </ul>
+
+        <div class="request-card" id="requestCard">
+          <div class="title"><span class="h">@new-handle-77</span> wants to use your capacity</div>
+          <div class="desc">Requesting 120K tokens over 4h · spare API credits · reputation 76, verified, not yet allow-listed</div>
+          <div class="request-actions">
+            <button class="btn approve" id="approveBtn">Approve</button>
+            <button class="btn deny" id="denyBtn">Deny</button>
+          </div>
+        </div>
+        <div class="resolved-note" id="resolvedNote"></div>
+      </section>
+    </div>
+
+  </div>
+</div>
+
+<script>
+(function(){
+  var shell = document.getElementById('shell');
+
+  // ---- master toggle ----
+  var masterToggle = document.getElementById('masterToggle');
+  var shareFields = document.getElementById('shareFields');
+  var masterStatus = document.getElementById('masterStatus');
+  var badgeState = document.getElementById('badgeState');
+
+  function applyMaster(){
+    var on = masterToggle.checked;
+    shareFields.disabled = !on;
+    shell.classList.toggle('armed-off', !on);
+    badgeState.textContent = on ? 'armed' : 'opt-in';
+    masterStatus.innerHTML = on
+      ? 'armed — routing to <span class="n">3</span> peers'
+      : 'idle — nothing shared';
+  }
+  masterToggle.addEventListener('change', applyMaster);
+  applyMaster();
+
+  // ---- idle-hours strip ----
+  var strip = document.getElementById('hourStrip');
+  var cells = [];
+  for (var h = 0; h < 24; h++){
+    var i = document.createElement('i');
+    strip.appendChild(i);
+    cells.push(i);
+  }
+  var idleStart = document.getElementById('idleStart');
+  var idleEnd = document.getElementById('idleEnd');
+  function paintStrip(){
+    var s = parseInt(idleStart.value.split(':')[0], 10);
+    var e = parseInt(idleEnd.value.split(':')[0], 10);
+    for (var h = 0; h < 24; h++){
+      var idle = (s <= e) ? (h >= s && h < e) : (h >= s || h < e);
+      cells[h].classList.toggle('idle', idle);
+    }
+  }
+  idleStart.addEventListener('input', paintStrip);
+  idleEnd.addEventListener('input', paintStrip);
+  paintStrip();
+
+  // ---- cap slider ----
+  var capSlider = document.getElementById('capSlider');
+  var capValue = document.getElementById('capValue');
+  var meterFill = document.getElementById('meterFill');
+  var meterPct = document.getElementById('meterPct');
+  var donatedVal = document.getElementById('donatedVal');
+
+  function fmt(n){ return Math.round(n).toLocaleString('en-US'); }
+
+  function recomputeMeter(){
+    var cap = parseInt(capSlider.value, 10);
+    var donated = parseInt(donatedVal.textContent.replace(/,/g,''), 10);
+    var pct = Math.min(100, Math.round((donated / cap) * 100));
+    meterFill.style.width = pct + '%';
+    meterPct.textContent = pct + '%';
+  }
+  capSlider.addEventListener('input', function(){
+    capValue.textContent = fmt(capSlider.value) + ' tok';
+    recomputeMeter();
+  });
+  recomputeMeter();
+
+  // ---- local compute detail toggle ----
+  var localCap = document.getElementById('localCap');
+  var localDetail = document.getElementById('localDetail');
+  localCap.addEventListener('change', function(){
+    localDetail.style.display = localCap.checked ? 'block' : 'none';
+  });
+
+  // ---- recipients radio ----
+  var recipientOpts = document.querySelectorAll('.radio-opt');
+  recipientOpts.forEach(function(opt){
+    opt.querySelector('input[type="radio"]').addEventListener('change', function(){
+      recipientOpts.forEach(function(o){ o.classList.remove('active'); });
+      opt.classList.add('active');
+    });
+  });
+
+  // ---- allow-list chips ----
+  var chipList = document.getElementById('chipList');
+  var chipInput = document.getElementById('chipInput');
+  function addChip(handle){
+    var span = document.createElement('span');
+    span.className = 'chip';
+    span.textContent = handle + ' ';
+    var btn = document.createElement('button');
+    btn.setAttribute('data-remove', '');
+    btn.textContent = '×';
+    span.appendChild(btn);
+    chipList.appendChild(span);
+  }
+  chipList.addEventListener('click', function(e){
+    if (e.target.matches('button[data-remove]')) e.target.closest('.chip').remove();
+  });
+  chipInput.addEventListener('keydown', function(e){
+    if (e.key === 'Enter' && chipInput.value.trim()){
+      var v = chipInput.value.trim();
+      addChip(v.startsWith('@') ? v : '@' + v);
+      chipInput.value = '';
+    }
+  });
+
+  // ---- live-ish counters ----
+  var receivedVal = document.getElementById('receivedVal');
+  setInterval(function(){
+    if (!masterToggle.checked) return;
+    var d = parseInt(donatedVal.textContent.replace(/,/g,''), 10);
+    var cap = parseInt(capSlider.value, 10);
+    if (d < cap) donatedVal.textContent = fmt(Math.min(cap, d + Math.round(400 + Math.random()*1800)));
+    recomputeMeter();
+  }, 2600);
+  setInterval(function(){
+    var r = parseInt(receivedVal.textContent.replace(/,/g,''), 10);
+    receivedVal.textContent = fmt(r + Math.round(150 + Math.random()*700));
+  }, 4200);
+
+  // ---- pending request approve/deny ----
+  var requestCard = document.getElementById('requestCard');
+  var resolvedNote = document.getElementById('resolvedNote');
+  var pendingEdge = document.getElementById('pendingEdge');
+  var p1 = document.getElementById('pendingPacket1');
+  var p2 = document.getElementById('pendingPacket2');
+
+  document.getElementById('approveBtn').addEventListener('click', function(){
+    pendingEdge.classList.add('approved');
+    p1.classList.add('on');
+    p2.classList.add('on');
+    requestCard.style.display = 'none';
+    resolvedNote.className = 'resolved-note show';
+    resolvedNote.innerHTML = '<b>@new-handle-77 approved.</b> Allow-listed and routing — capacity now flowing under your nightly cap.';
+  });
+  document.getElementById('denyBtn').addEventListener('click', function(){
+    requestCard.style.display = 'none';
+    resolvedNote.className = 'resolved-note show';
+    resolvedNote.innerHTML = '<b>@new-handle-77 denied.</b> No capacity routed. They can re-request in 24h.';
+  });
+
+  // ---- reduced motion: slow the breathing pulse too ----
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+    document.getElementById('youPulse').style.display = 'none';
+  }
+})();
+</script>
+</body>
+</html>
