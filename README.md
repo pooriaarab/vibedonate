@@ -12,17 +12,17 @@ Part of the **Vibe Suite** — companion tools for agentic coding CLIs (Claude C
 
 ```bash
 # use it
-npx vibedonate-cli share --compute --idle 22:00-07:00 --cap 2M --pool allowlist:alice,bob
+npx vibedonate share --compute --idle 22:00-07:00 --cap 2M --pool allowlist:alice,bob
 
 # or install globally
-npm install -g vibedonate-cli
+npm install -g vibedonate
 vibedonate status
 ```
 
 As a library:
 
 ```bash
-npm install vibedonate-cli
+npm install vibedonate
 ```
 
 ## Quick start (CLI)
@@ -74,7 +74,7 @@ import {
   authorizePeer,
   DONATE_COMPUTE_SCOPE,
   createConsentLedger, // from @pooriaarab/vibe-core, re-exported
-} from 'vibedonate-cli';
+} from 'vibedonate';
 
 const config = createDonationConfig({
   idle: '22:00-07:00',      // wraps midnight
