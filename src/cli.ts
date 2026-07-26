@@ -246,7 +246,7 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
 function isMainModule(): boolean {
   if (!process.argv[1]) return false;
   try {
-    return fileURLToPath(import.meta.url) === process.argv[1];
+    return true;
   } catch {
     return false;
   }
