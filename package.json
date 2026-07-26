@@ -1,0 +1,35 @@
+{
+  "name": "@pooriaarab/vibedonate",
+  "version": "0.1.0",
+  "description": "BitTorrent-style mesh for AI inference — donate spare local compute across agentic CLIs. Opt-in, metered, your hardware. Local-first. v0: local-compute node + metering + allow-list.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Pooria Arab",
+  "bin": { "vibedonate": "./dist/cli.js" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts src/cli.ts src/mcp.ts --format esm --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@pooriaarab/vibe-core": "^0.1.0",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "homepage": "https://github.com/pooriaarab/vibedonate#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/pooriaarab/vibedonate.git" },
+  "bugs": { "url": "https://github.com/pooriaarab/vibedonate/issues" },
+  "keywords": ["vibe-suite", "vibedonate", "claude-code", "codex", "agentic", "cli", "mcp", "inference", "mesh", "local-first"],
+  "publishConfig": { "access": "public" },
+  "engines": { "node": ">=18" }
+}
