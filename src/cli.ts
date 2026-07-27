@@ -27,12 +27,15 @@ import {
   fileMeteringStore,
   isSharingActive,
   loadConfigFromFile,
+  publishDonationEvent,
+  resolveCompute,
   saveConfigToFile,
+  type ComputeResolution,
   type DonationConfig,
 } from './index.js';
 
 /** Matches package.json — single source for the `--version` string. */
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 export type ParsedCommand =
   | { readonly kind: 'help' }
@@ -58,9 +61,15 @@ COMMANDS
            --cap N|2M|500k     max tokens donated per UTC day
            --pool open|org:id[,member...]|allowlist:peer,peer
 
-  status   Show config, metering totals, and whether sharing right now.
+  status   Show config, metering totals, the resolved local model, and whether
+           sharing right now.
   stop     Disable donation (revokes the donate:compute consent grant).
   mcp      Run the MCP server over stdio (tools: status, request_capacity).
+
+LOCAL COMPUTE
+  'status' and the MCP 'status'/'request_capacity' tools probe for an on-device
+  model via vibe-core's cascade (Ollama by default; set VIBEDONATE_OLLAMA_MODEL).
+  Donated compute is served on-device only — it never leaves your machine.
 
 DATA
   State lives in $VIBEDONATE_DIR (default ~/.vibedonate): config.json,
@@ -159,6 +168,7 @@ export function renderStatus(
   totals: { donated: number; received: number; count: number },
   sharing: boolean,
   now: Date,
+  localModel?: ComputeResolution | null,
 ): string {
   if (config === null) {
     return 'vibedonate is not armed. Run `vibedonate share ...` to start.\n';
@@ -169,6 +179,9 @@ export function renderStatus(
   lines.push(`  idle:     ${config.idle.start}-${config.idle.end} (UTC)`);
   lines.push(`  cap:      ${config.cap.toLocaleString('en-US')} tokens/day`);
   lines.push(`  pool:     ${poolDesc(config.pool)}`);
+  if (localModel) {
+    lines.push(`  compute:  ${localModel.label}${localModel.available ? '' : ' \u26A0 not usable'}`);
+  }
   lines.push(`  usage:    donated ${totals.donated.toLocaleString('en-US')} (today ${donatedToday.toLocaleString('en-US')}) \u00B7 received ${totals.received.toLocaleString('en-US')} \u00B7 ${totals.count} receipt(s)`);
   lines.push(`  sharing:  ${sharing ? 'yes' : 'no'} (now ${now.toISOString()})`);
   return `${lines.join('\n')}\n`;
@@ -205,6 +218,7 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
       createConsentLedger(fileConsentStore(dir)).grant(DONATE_COMPUTE_SCOPE, 'vibedonate share');
       // Touch the metering file so `status` has stable totals even before first use.
       createMeteringLedger(fileMeteringStore(dir));
+      publishDonationEvent('share', { tier: cmd.config.tier });
       process.stdout.write(renderStatus(cmd.config, 0, { donated: 0, received: 0, count: 0 }, true, new Date()));
       return 0;
     }
@@ -214,11 +228,13 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
       const consent = createConsentLedger(fileConsentStore(dir));
       const now = new Date();
       const totals = ledger.totals(now);
+      // Real probe: is there an on-device model that could actually serve?
+      const localModel = await resolveCompute();
       const sharing =
         config !== null &&
         consent.allows(DONATE_COMPUTE_SCOPE) &&
         isSharingActive(config, now, false, totals.donatedToday);
-      process.stdout.write(renderStatus(config, totals.donatedToday, totals, sharing, now));
+      process.stdout.write(renderStatus(config, totals.donatedToday, totals, sharing, now, localModel));
       return 0;
     }
     case 'stop': {
@@ -227,6 +243,7 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
       if (config !== null) {
         saveConfigToFile({ ...config, enabled: false }, dir);
       }
+      publishDonationEvent('stop');
       process.stdout.write('vibedonate stopped — donation disabled and consent revoked.\n');
       return 0;
     }

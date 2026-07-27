@@ -1,17 +1,31 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
   authorizePeer,
   createConsentLedger,
   createDonationConfig,
+  createDonationHooks,
+  createHookBus,
+  createLocalMeshRuntime,
   createMeteringLedger,
+  createOllamaChatRunner,
   DONATE_COMPUTE_SCOPE,
+  evaluateCapacity,
   isSharingActive,
+  makeEvent,
   parseCap,
   parseIdleWindow,
   parsePool,
+  publishDonationEvent,
+  resolveCompute,
   withinIdleWindow,
+  type LabeledRunner,
   type MeteringStore,
+  type SystemDeps,
 } from './index.js';
 
 function config(opts: {
@@ -227,5 +241,228 @@ describe('consent integration (donate:compute scope)', () => {
     expect(ledger.allows(DONATE_COMPUTE_SCOPE)).toBe(true);
     ledger.revoke(DONATE_COMPUTE_SCOPE);
     expect(ledger.allows(DONATE_COMPUTE_SCOPE)).toBe(false);
+  });
+});
+
+describe('evaluateCapacity (the shared gate)', () => {
+  function granted() {
+    const c = createConsentLedger();
+    c.grant(DONATE_COMPUTE_SCOPE);
+    return c;
+  }
+  const ctx = (over: Partial<{ now: Date; systemBusy: boolean; donatedToday: number; localAvailable: boolean }> = {}) => ({
+    now: over.now ?? at(23, 0),
+    systemBusy: over.systemBusy ?? false,
+    donatedToday: over.donatedToday ?? 0,
+    localAvailable: over.localAvailable ?? true,
+  });
+
+  it('allows when every condition is green', () => {
+    const v = evaluateCapacity(config(), granted(), 'alice', 100, ctx());
+    expect(v.decision).toBe('allow');
+    expect(v.reason).toMatch(/remain after/);
+  });
+  it('denies when stopped', () => {
+    expect(evaluateCapacity(config({ enabled: false }), granted(), 'alice', 100, ctx()).decision).toBe('deny');
+  });
+  it('denies without the consent grant', () => {
+    expect(evaluateCapacity(config(), createConsentLedger(), 'alice', 100, ctx()).decision).toBe('deny');
+  });
+  it('denies a peer not in the pool', () => {
+    expect(evaluateCapacity(config(), granted(), 'eve', 100, ctx()).decision).toBe('deny');
+  });
+  it('denies when no on-device model is available', () => {
+    expect(evaluateCapacity(config(), granted(), 'alice', 100, ctx({ localAvailable: false })).decision).toBe('deny');
+  });
+  it('denies while local activity is in progress', () => {
+    expect(evaluateCapacity(config(), granted(), 'alice', 100, ctx({ systemBusy: true })).decision).toBe('deny');
+  });
+  it('denies outside the idle window', () => {
+    expect(evaluateCapacity(config(), granted(), 'alice', 100, ctx({ now: at(12, 0) })).decision).toBe('deny');
+  });
+  it('denies when the daily cap is reached', () => {
+    const c = config({ cap: 1_000 });
+    expect(evaluateCapacity(c, granted(), 'alice', 100, ctx({ donatedToday: 1_000 })).decision).toBe('deny');
+  });
+  it('denies when the request exceeds the remaining headroom', () => {
+    const c = config({ cap: 1_000 });
+    const v = evaluateCapacity(c, granted(), 'alice', 500, ctx({ donatedToday: 600 }));
+    expect(v.decision).toBe('deny');
+    expect(v.reason).toMatch(/400 tokens remain/);
+  });
+  it('checks in the documented precedence order (model before window)', () => {
+    // No model AND outside window → the model reason wins (checked earlier).
+    const v = evaluateCapacity(config(), granted(), 'alice', 100, ctx({ localAvailable: false, now: at(12, 0) }));
+    expect(v.reason).toMatch(/local chat model/);
+  });
+});
+
+describe('resolveCompute (cascade-backed)', () => {
+  function fakeRunner(available: boolean): LabeledRunner {
+    return {
+      id: 'fake · unit',
+      capability: 'chat',
+      available: async () => available,
+      generate: async <TReq = unknown, TOut = unknown>(_req: TReq): Promise<TOut> =>
+        ({ ok: true }) as TOut,
+    };
+  }
+
+  it('resolves to an available on-device runner, egress forbidden', async () => {
+    const r = await resolveCompute({ runners: [fakeRunner(true)] });
+    expect(r.available).toBe(true);
+    expect(r.tier).toBe('local');
+    expect(r.egress).toBe(false);
+    expect(r.label).toBe('fake · unit');
+    expect(r.runner).toBeDefined();
+  });
+
+  it('reports unavailable when no runner is ready', async () => {
+    const r = await resolveCompute({ runners: [fakeRunner(false)] });
+    expect(r.available).toBe(false);
+    expect(r.egress).toBe(false);
+    expect(r.label).toMatch(/no local chat model/);
+    expect(r.runner).toBeUndefined();
+  });
+
+  it('reports unavailable when pickLocal returns null', async () => {
+    const r = await resolveCompute({ pickLocal: async () => null });
+    expect(r.available).toBe(false);
+  });
+});
+
+describe('createOllamaChatRunner', () => {
+  const yes: SystemDeps = { detect: async (b) => b === 'ollama', run: async () => undefined };
+  const no: SystemDeps = { detect: async () => false, run: async () => undefined };
+
+  it('detects ollama on PATH and exposes the chat capability', async () => {
+    const r = createOllamaChatRunner(yes, 'qwen2.5:7b');
+    expect(r.capability).toBe('chat');
+    expect(r.id).toBe('ollama · qwen2.5:7b');
+    expect(await r.available()).toBe(true);
+    expect(await createOllamaChatRunner(no).available()).toBe(false);
+  });
+
+  it('generate shells out and returns stdout (via injectable exec)', async () => {
+    const calls: string[][] = [];
+    const exec = async (bin: string, args: readonly string[]) => {
+      calls.push([bin, ...args]);
+      return { stdout: 'generated text', stderr: '' };
+    };
+    const r = createOllamaChatRunner(yes, 'qwen2.5:7b', exec);
+    const out = await r.generate({ prompt: 'hi' });
+    expect(out).toEqual({ model: 'qwen2.5:7b', output: 'generated text' });
+    expect(calls[0]).toEqual(['ollama', 'run', 'qwen2.5:7b', 'hi']);
+  });
+});
+
+describe('createLocalMeshRuntime (the runtime that commits)', () => {
+  function setup(over: Partial<{ cap: number; enabled: boolean; local: boolean; donatedToday: number }> = {}) {
+    const cfg = config({ cap: over.cap ?? 2_000_000, enabled: over.enabled ?? true });
+    const consent = createConsentLedger();
+    consent.grant(DONATE_COMPUTE_SCOPE);
+    const ledger = createMeteringLedger();
+    const now = () => at(23, 0);
+    const rt = createLocalMeshRuntime({
+      config: () => cfg,
+      consent: () => consent,
+      ledger: () => ledger,
+      now,
+      systemBusy: () => false,
+      resolveLocal: async () => ({
+        tier: 'local',
+        egress: false,
+        available: over.local ?? true,
+        label: 'fake · unit',
+      }),
+    });
+    return { cfg, consent, ledger, rt };
+  }
+
+  it('allows + commits a hash-chained receipt on allow', async () => {
+    const { ledger, rt } = setup();
+    const v = await rt.serve({ peer: 'alice', tokens: 250 });
+    expect(v.decision).toBe('allow');
+    expect(v.receipt).toBeDefined();
+    expect(ledger.all()).toHaveLength(1);
+    expect(ledger.verify()).toBe(true);
+    expect(ledger.totals().donated).toBe(250);
+  });
+
+  it('denies an unauthorized peer without recording', async () => {
+    const { ledger, rt } = setup();
+    const v = await rt.serve({ peer: 'eve', tokens: 10 });
+    expect(v.decision).toBe('deny');
+    expect(v.receipt).toBeUndefined();
+    expect(ledger.all()).toHaveLength(0);
+  });
+
+  it('denies when no on-device model is available', async () => {
+    const { ledger, rt } = setup({ local: false });
+    const v = await rt.serve({ peer: 'alice', tokens: 10 });
+    expect(v.decision).toBe('deny');
+    expect(v.reason).toMatch(/local chat model/);
+    expect(ledger.all()).toHaveLength(0);
+  });
+
+  it('denies past the daily cap without recording', async () => {
+    const { ledger, rt } = setup({ cap: 1_000, donatedToday: 0 });
+    // Pre-load the ledger to the cap so the runtime sees donatedToday === cap.
+    ledger.record({ peer: 'alice', tokens: 1_000, model: 'm', ts: at(23, 0).toISOString() });
+    const v = await rt.serve({ peer: 'alice', tokens: 1 });
+    expect(v.decision).toBe('deny');
+    expect(v.reason).toMatch(/daily cap/);
+    expect(ledger.all()).toHaveLength(1); // only the pre-record, no new commit
+  });
+
+  it('rejects non-positive token requests', async () => {
+    const { rt } = setup();
+    expect((await rt.serve({ peer: 'alice', tokens: 0 })).decision).toBe('deny');
+    expect((await rt.serve({ peer: 'alice', tokens: -5 })).decision).toBe('deny');
+  });
+});
+
+describe('donation hooks + notify channel', () => {
+  let dir: string;
+  it('creates a fresh temp notify dir per test', () => {
+    dir = mkdtempSync(join(tmpdir(), 'vdb-hooks-'));
+    expect(dir.length).toBeGreaterThan(0);
+  });
+
+  it('publishDonationEvent appends a normalized VibeEvent to the channel', () => {
+    const file = join(dir, 'notify.jsonl');
+    publishDonationEvent('share', { tier: 'compute' }, { cwd: '/repo', file });
+    publishDonationEvent('stop', undefined, { cwd: '/repo', file });
+    const lines = readFileSync(file, 'utf8').trim().split('\n').filter((l) => l.length > 0);
+    expect(lines).toHaveLength(2);
+    const first = JSON.parse(lines[0]!) as { kind: string; agent: string; cwd: string; payload: { action: string; tier?: string } };
+    expect(first.kind).toBe('manual');
+    expect(first.agent).toBe('vibedonate');
+    expect(first.cwd).toBe('/repo');
+    expect(first.payload.action).toBe('share');
+    expect(first.payload.tier).toBe('compute');
+    expect((JSON.parse(lines[1]!) as { payload: { action: string } }).payload.action).toBe('stop');
+  });
+
+  it('createDonationHooks publishes and reacts to session-end', async () => {
+    const file = join(dir, 'session.jsonl');
+    let stops = 0;
+    const bus = createHookBus();
+    const hooks = createDonationHooks(bus, { onStop: () => { stops += 1; }, cwd: '/repo', file });
+    hooks.publish('serve', { peer: 'alice', tokens: 10 });
+    // A harness session-end milestone stops donation.
+    await bus.emit(makeEvent('session-end', 'claude-code', '/repo'));
+    expect(stops).toBe(1);
+    // dispose makes the handler inert.
+    hooks.dispose();
+    await bus.emit(makeEvent('session-end', 'claude-code', '/repo'));
+    expect(stops).toBe(1);
+    const lines = readFileSync(file, 'utf8').trim().split('\n');
+    expect(lines.length).toBe(1);
+  });
+
+  it('cleans up the temp dir', () => {
+    rmSync(dir, { recursive: true, force: true });
+    expect(dir.length).toBeGreaterThan(0); // sanity
   });
 });
