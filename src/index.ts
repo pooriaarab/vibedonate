@@ -15,18 +15,86 @@
  * with `config.enabled`; `request_capacity` (MCP) refuses without it.
  */
 
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 
-// Re-exported so consumers of this package never import @vibe/core directly for
-// the pieces vibedonate leans on. verbatimModuleSyntax → split value vs. type.
-import { createConsentLedger } from '@pooriaarab/vibe-core';
-import type { ConsentGrant, ConsentLedger, ConsentScope, ConsentStore } from '@pooriaarab/vibe-core';
+// vibe-core is the suite spine: the model-preference cascade, the cross-harness
+// hooks bus, and the consent ledger. vibedonate re-exports the pieces it leans on
+// so consumers of this package never reach for @pooriaarab/vibe-core directly for
+// them. verbatimModuleSyntax → value imports and type imports are split.
+import {
+  badge,
+  createCascade,
+  createConsentLedger,
+  createHookBus,
+  localRunners,
+  makeEvent,
+  mapSignalToKind,
+  notify,
+  pickLocalRunner,
+  realDeps,
+  tierChip,
+} from '@pooriaarab/vibe-core';
+import type {
+  AsyncHookBus,
+  Capability,
+  Cascade,
+  CascadeDeps,
+  CascadeRequest,
+  CascadeTier,
+  ConsentGrant,
+  ConsentLedger,
+  ConsentScope,
+  ConsentStore,
+  HookBus,
+  HookBusOptions,
+  HookHandler,
+  LocalRunner,
+  ProviderAdapter,
+  ResolvedProvider,
+  SystemDeps,
+  TriggerKind,
+  VibeEvent,
+} from '@pooriaarab/vibe-core';
 
-export { createConsentLedger };
-export type { ConsentGrant, ConsentLedger, ConsentScope, ConsentStore };
+export {
+  badge,
+  createCascade,
+  createConsentLedger,
+  createHookBus,
+  localRunners,
+  makeEvent,
+  mapSignalToKind,
+  notify,
+  pickLocalRunner,
+  realDeps,
+  tierChip,
+};
+export type {
+  AsyncHookBus,
+  Capability,
+  Cascade,
+  CascadeDeps,
+  CascadeRequest,
+  CascadeTier,
+  ConsentGrant,
+  ConsentLedger,
+  ConsentScope,
+  ConsentStore,
+  HookBus,
+  HookBusOptions,
+  HookHandler,
+  LocalRunner,
+  ProviderAdapter,
+  ResolvedProvider,
+  SystemDeps,
+  TriggerKind,
+  VibeEvent,
+};
 
 /** The consent scope that arms local-compute donation. {@link createDonationConfig} */
 export const DONATE_COMPUTE_SCOPE = 'donate:compute' as const;
@@ -454,6 +522,378 @@ export function createMeteringLedger(store?: MeteringStore): MeteringLedger {
         prev = r.hash;
       }
       return true;
+    },
+  };
+}
+
+// ===========================================================================
+// Local compute: cascade-backed tier-3 model resolution.
+//
+// vibedonate's whole product is "donate spare LOCAL compute". That only means
+// something if there is an on-device model to serve with. vibe-core's cascade
+// resolves the cheapest, most-private provider for a capability; with
+// `allowEgress:false` it considers ONLY the on-device (local) tier — so donated
+// compute provably never leaves your machine. vibe-core ships an `audio` runner
+// but no `chat` runner, so vibedonate contributes an Ollama-backed one (real
+// detection via `command -v ollama`; real generation via `ollama run`). Other
+// runners (wasm, bundled models) drop into {@link defaultChatRunners} as they land.
+// ===========================================================================
+
+/** The generation capability a local-compute donor serves. */
+export const CHAT_CAPABILITY: Capability = 'chat';
+
+/** A {@link LocalRunner} that also carries an id, for human-facing labels. */
+export interface LabeledRunner extends LocalRunner {
+  readonly id: string;
+}
+
+/** Injectable deps for {@link resolveCompute}. Defaults probe the real machine. */
+export interface LocalComputeDeps {
+  /** How to detect+exec local binaries. Default {@link realDeps}. */
+  readonly system?: SystemDeps;
+  /** Custom runner list. Default {@link defaultChatRunners}. */
+  readonly runners?: readonly LabeledRunner[];
+  /** Override the whole pickLocal step (tests). */
+  readonly pickLocal?: (capability: Capability) => Promise<LocalRunner | null>;
+}
+
+/** What {@link resolveCompute} learned about on-device compute. Pure data. */
+export interface ComputeResolution {
+  readonly tier: CascadeTier;
+  /** Local compute never egresses — always false. Surfaced for clarity. */
+  readonly egress: false;
+  readonly available: boolean;
+  /** Human-facing: `ollama · qwen2.5:7b` or `no local chat model (…)`. */
+  readonly label: string;
+  /** The resolved runner when `available`, else undefined. */
+  readonly runner?: LocalRunner;
+}
+
+const DEFAULT_OLLAMA_MODEL =
+  process.env['VIBEDONATE_OLLAMA_MODEL'] && process.env['VIBEDONATE_OLLAMA_MODEL'].length > 0
+    ? process.env['VIBEDONATE_OLLAMA_MODEL']
+    : 'qwen2.5:7b';
+
+/** Capture stdout/stderr from a binary. Injectable so generation is unit-testable. */
+export type ExecCapture = (bin: string, args: readonly string[]) => Promise<{ stdout: string; stderr: string }>;
+
+const realExec: ExecCapture = /* @__PURE__ */ promisify(execFile);
+
+/**
+ * A tier-3 `chat` runner backed by Ollama.
+ *
+ * Detection is real (`command -v ollama`); generation really shells out to
+ * `ollama run <model>` and returns its stdout. v0 uses this for the *availability
+ * signal* in {@link resolveCompute} — actually serving a peer's inference over
+ * the mesh is the transport layer landing after v0 (see docs/spec.md). Nothing
+ * here is stubbed: if `generate` is called, it runs.
+ */
+export function createOllamaChatRunner(
+  deps: SystemDeps = realDeps,
+  model: string = DEFAULT_OLLAMA_MODEL,
+  exec: ExecCapture = realExec,
+): LabeledRunner {
+  return {
+    id: `ollama · ${model}`,
+    capability: CHAT_CAPABILITY,
+    async available() {
+      return deps.detect('ollama');
+    },
+    async generate<TReq = unknown, TOut = unknown>(req: TReq): Promise<TOut> {
+      const r = req as { model?: string; prompt: string };
+      const useModel = r.model ?? model;
+      if (!useModel) throw new Error('ollama generate() needs a model');
+      if (typeof r.prompt !== 'string') throw new Error('ollama generate() needs { prompt: string }');
+      const { stdout } = await exec('ollama', ['run', useModel, r.prompt]);
+      return { model: useModel, output: stdout } as TOut;
+    },
+  };
+}
+
+/** The local runners vibedonate considers for the `chat` capability. */
+export function defaultChatRunners(deps: SystemDeps = realDeps): readonly LabeledRunner[] {
+  return [createOllamaChatRunner(deps)];
+}
+
+/**
+ * Resolve on-device compute for the `chat` capability through vibe-core's
+ * cascade, with egress forbidden. Returns `{ available: true, runner }` when a
+ * local model is usable right now, or `{ available: false }` (with an actionable
+ * label) otherwise. Pure w.r.t. its deps — no module-level state.
+ *
+ * `allowEgress:false` means the cascade can only pick the `local` tier, so this
+ * never sends anything off-machine by construction.
+ */
+export async function resolveCompute(deps: LocalComputeDeps = {}): Promise<ComputeResolution> {
+  const runners = deps.runners ?? defaultChatRunners(deps.system);
+  const pickLocal =
+    deps.pickLocal ?? ((capability: Capability) => pickLocalRunner(capability, runners));
+  // An in-memory consent ledger suffices: with allowEgress:false the cascade
+  // never consults consent (only the local tier is eligible).
+  const cascade = createCascade({ consent: createConsentLedger(), pickLocal });
+  try {
+    const resolved = await cascade.resolve({ capability: CHAT_CAPABILITY, allowEgress: false });
+    const runner: LocalRunner | undefined =
+      resolved.tier === 'local' ? (resolved.provider as LocalRunner) : undefined;
+    const labeled = runner !== undefined ? runners.find((r) => r === runner) : undefined;
+    return {
+      tier: 'local',
+      egress: false,
+      available: true,
+      label: labeled !== undefined ? labeled.id : resolved.label,
+      runner,
+    };
+  } catch {
+    return {
+      tier: 'local',
+      egress: false,
+      available: false,
+      label: 'no local chat model (install ollama + `ollama pull <model>`)',
+    };
+  }
+}
+
+// ===========================================================================
+// The single capacity gate (shared by the MCP pre-flight and the mesh runtime).
+// ===========================================================================
+
+/** Context the capacity gate needs that isn't on the config. All injected. */
+export interface CapacityContext {
+  readonly now: Date;
+  readonly systemBusy: boolean;
+  /** Donated tokens already recorded for `now`'s UTC day. */
+  readonly donatedToday: number;
+  /** Whether an on-device model is available to serve (see {@link resolveCompute}). */
+  readonly localAvailable: boolean;
+}
+
+export interface CapacityDecision {
+  readonly decision: 'allow' | 'deny';
+  readonly reason: string;
+}
+
+/**
+ * The single capacity gate. **Pure.** Both `request_capacity` (the MCP
+ * pre-flight, which does NOT consume) and {@link MeshRuntime.serve} (the
+ * runtime, which commits a receipt) call this, so the gate has exactly one
+ * definition. Checks in order: enabled → consent → peer auth → local model →
+ * not busy → idle window → daily cap → request fits remaining.
+ */
+export function evaluateCapacity(
+  config: DonationConfig,
+  consent: ConsentLedger,
+  peer: string,
+  tokens: number,
+  ctx: CapacityContext,
+): CapacityDecision {
+  if (!config.enabled) return { decision: 'deny', reason: 'donation is stopped' };
+  if (!consent.allows(DONATE_COMPUTE_SCOPE)) {
+    return { decision: 'deny', reason: 'donate:compute consent not granted' };
+  }
+  if (authorizePeer(config, peer) === 'deny') {
+    return { decision: 'deny', reason: `peer "${peer}" not authorized by the ${config.pool.kind} pool` };
+  }
+  if (!ctx.localAvailable) {
+    return { decision: 'deny', reason: 'no local chat model available to serve' };
+  }
+  if (ctx.systemBusy) return { decision: 'deny', reason: 'local activity in progress' };
+  if (!withinIdleWindow(config.idle, ctx.now)) {
+    return { decision: 'deny', reason: `outside idle window ${config.idle.start}-${config.idle.end}` };
+  }
+  if (ctx.donatedToday >= config.cap) return { decision: 'deny', reason: 'daily cap reached' };
+  const remaining = config.cap - ctx.donatedToday;
+  if (tokens > remaining) {
+    return { decision: 'deny', reason: `only ${remaining} tokens remain under the daily cap` };
+  }
+  return { decision: 'allow', reason: `ok — ${remaining - tokens} tokens remain after` };
+}
+
+// ===========================================================================
+// The mesh runtime — the ONE seam that needs a later layer (the P2P transport).
+//
+// A MeshRuntime receives a peer's capacity request, runs it through the full
+// gate, and — on allow — records a real, hash-chained receipt in the metering
+// ledger. The transport that carries a remote peer's request to this node (and
+// the donor's inference back) is post-v0: encrypted peer-to-peer payload, relay
+// only for discovery/NAT (docs/spec.md §"Routing"). Everything except that
+// transport is implemented here for real, so the ledger is exercised end-to-end.
+// ===========================================================================
+
+export interface MeshRequest {
+  readonly peer: string;
+  readonly tokens: number;
+  /** Model id to attribute on the receipt. Defaults to the resolved runner's label. */
+  readonly model?: string;
+}
+
+export interface MeshVerdict {
+  readonly decision: 'allow' | 'deny';
+  readonly reason: string;
+  /** Present only on `allow` — the receipt committed to the ledger. */
+  readonly receipt?: UsageReceipt;
+}
+
+export interface LocalMeshDeps {
+  readonly config: () => DonationConfig;
+  readonly consent: () => ConsentLedger;
+  readonly ledger: () => MeteringLedger;
+  readonly now: () => Date;
+  readonly systemBusy: () => boolean;
+  /** Resolve on-device compute (default {@link resolveCompute}). */
+  readonly resolveLocal?: () => Promise<ComputeResolution>;
+}
+
+export interface MeshRuntime {
+  /**
+   * Evaluate `req` through the full gate; on `allow` commit a donated receipt.
+   * The committed receipt is what makes the metering ledger a real, exercised
+   * artifact rather than a write-only stub.
+   */
+  serve(req: MeshRequest): Promise<MeshVerdict>;
+  // post-v0: connect(transport), onCapacityRequested(cb) — see docs/spec.md.
+}
+
+/**
+ * Create a local mesh runtime: real gate + real receipt commit, fed by injected
+ * deps. This is what a future P2P transport will hand remote requests to; today
+ * it's exercised directly (tests, a local node) and through the library API.
+ */
+export function createLocalMeshRuntime(deps: LocalMeshDeps): MeshRuntime {
+  return {
+    async serve(req) {
+      if (!Number.isFinite(req.tokens) || req.tokens <= 0) {
+        return { decision: 'deny', reason: 'tokens must be a positive number' };
+      }
+      const config = deps.config();
+      const consent = deps.consent();
+      const ledger = deps.ledger();
+      const now = deps.now();
+      const resolve = deps.resolveLocal ?? resolveCompute;
+      const local = await resolve();
+      const totals = ledger.totals(now);
+      const verdict = evaluateCapacity(config, consent, req.peer, req.tokens, {
+        now,
+        systemBusy: deps.systemBusy(),
+        donatedToday: totals.donatedToday,
+        localAvailable: local.available,
+      });
+      if (verdict.decision === 'deny') return verdict;
+      const receipt = ledger.record({
+        peer: req.peer,
+        tokens: req.tokens,
+        model: req.model ?? local.label,
+        ts: now.toISOString(),
+        direction: 'donated',
+      });
+      return { ...verdict, receipt };
+    },
+  };
+}
+
+// ===========================================================================
+// Donation lifecycle as suite-wide events (the hooks bus + notify channel).
+//
+// share/stop/serve/deny are milestones other vibe-suite tools (and the user's
+// dashboard) can observe via `~/.vibe/notify.jsonl`; a `session-end` milestone
+// from any harness cleanly stops donation. This is the real cross-harness hooks
+// integration vibe-core provides — not a stub.
+// ===========================================================================
+
+/** The harness id vibedonate stamps on its emitted events. */
+export const VIBEDONATE_AGENT = 'vibedonate' as const;
+
+/** Donation lifecycle actions published to the notify channel. */
+export type DonationAction = 'share' | 'stop' | 'serve' | 'deny';
+
+export interface DonationEventPayload {
+  readonly action: DonationAction;
+  readonly tier?: DonationTier;
+  readonly peer?: string;
+  readonly tokens?: number;
+  readonly reason?: string;
+  readonly [extra: string]: unknown;
+}
+
+export interface PublishOptions {
+  /** Cwd stamped on the event. Default `process.cwd()`. */
+  readonly cwd?: string;
+  /** Notify channel file. Default vibe-core's `~/.vibe/notify.jsonl`. */
+  readonly file?: string;
+}
+
+function toVibeEvent(
+  action: DonationAction,
+  cwd: string,
+  payload?: Omit<DonationEventPayload, 'action'>,
+): VibeEvent {
+  const p: DonationEventPayload = { action, ...payload };
+  // 'manual' is the TriggerKind for product-initiated suite events; the action
+  // lives in the payload so consumers can filter on it.
+  return makeEvent('manual', VIBEDONATE_AGENT, cwd, p);
+}
+
+/**
+ * Append a donation lifecycle event to the local notify channel (real,
+ * synchronous JSONL append via vibe-core). Best-effort: a failed append never
+ * throws, so notifications can't break donation.
+ */
+export function publishDonationEvent(
+  action: DonationAction,
+  payload?: Omit<DonationEventPayload, 'action'>,
+  opts: PublishOptions = {},
+): void {
+  const cwd = opts.cwd ?? process.cwd();
+  try {
+    notify(toVibeEvent(action, cwd, payload), opts.file !== undefined ? { file: opts.file } : undefined);
+  } catch {
+    // Notifications are best-effort; never let them break donation.
+  }
+}
+
+export interface DonationHooksOptions {
+  /** Cwd stamped on emitted events. Default `process.cwd()`. */
+  readonly cwd?: string;
+  /** Notify channel file. Default vibe-core's `~/.vibe/notify.jsonl`. */
+  readonly file?: string;
+  /** Called when a `session-end` event fires (clean stop on harness exit). */
+  readonly onStop?: () => void;
+}
+
+export interface DonationHooks {
+  /** Append a donation event to the local notify channel. Best-effort. */
+  publish(action: DonationAction, payload?: Omit<DonationEventPayload, 'action'>): void;
+  /** Make the session-end handler inert. */
+  dispose(): void;
+}
+
+/**
+ * Wire donation lifecycle into the suite. {@link DonationHooks.publish} appends a
+ * normalized {@link VibeEvent} to the local notify channel; if `onStop` is given,
+ * a `session-end` milestone from any harness triggers it — so vibedonate stops
+ * cleanly when its host session ends. Real integration with vibe-core's hooks bus.
+ */
+export function createDonationHooks(bus: AsyncHookBus, options: DonationHooksOptions = {}): DonationHooks {
+  const cwd = options.cwd ?? process.cwd();
+  const onStop = options.onStop;
+  let active = onStop !== undefined;
+  if (onStop) {
+    bus.on('session-end', () => {
+      if (active) onStop();
+    });
+  }
+  return {
+    publish(action, payload) {
+      try {
+        notify(
+          toVibeEvent(action, cwd, payload),
+          options.file !== undefined ? { file: options.file } : undefined,
+        );
+      } catch {
+        // best-effort
+      }
+    },
+    dispose() {
+      active = false;
     },
   };
 }
