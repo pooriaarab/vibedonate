@@ -2,20 +2,24 @@
  * vibedonate MCP server (stdio).
  *
  * Exposes two tools an agent (or any MCP client) can call:
- *   - `status`           — current config, metering totals, and whether the
- *                          node is sharing *right now*.
+ *   - `status`           — current config, metering totals, the resolved
+ *                          on-device model, and whether the node is sharing
+ *                          *right now*.
  *   - `request_capacity` — a pre-flight: "can you take `tokens` for `peer`?"
  *                          Returns allow/deny with a reason, gating on consent,
- *                          peer authorization, the idle window, and the cap.
+ *                          peer authorization, on-device compute availability,
+ *                          the idle window, local activity, and the daily cap.
  *
  * `request_capacity` only *asks* — it does not record consumption. Recording
  * real usage (and the donor actually running inference for the peer) is the
  * runtime half of the mesh and lands after v0; the gate is the part you can
- * trust today.
+ * trust today. Both tools share one pure gate ({@link evaluateCapacity}) with
+ * the library's mesh runtime, so the answer is identical everywhere.
  *
  * Dependency injection keeps the server deterministic: the config, ledger,
- * consent ledger, clock, and "busy" signal are all functions the caller wires.
- * {@link runMcpServer} wires them to the real file-backed stores over stdio.
+ * consent ledger, clock, "busy" signal, and compute resolver are all functions
+ * the caller wires. {@link runMcpServer} wires them to the real file-backed
+ * stores (and a real on-device probe) over stdio.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -25,14 +29,16 @@ import { z } from 'zod';
 import { createConsentLedger } from '@pooriaarab/vibe-core';
 
 import {
-  authorizePeer,
   createMeteringLedger,
   defaultDataDir,
   DONATE_COMPUTE_SCOPE,
+  evaluateCapacity,
   fileConsentStore,
   fileMeteringStore,
   isSharingActive,
   loadConfigFromFile,
+  resolveCompute,
+  type ComputeResolution,
   type ConsentLedger,
   type DonationConfig,
   type MeteringLedger,
@@ -47,6 +53,8 @@ export interface McpServerDeps {
   now(): Date;
   /** True if local activity should pause donation. */
   systemBusy(): boolean;
+  /** Resolve on-device compute (default {@link resolveCompute}). */
+  resolveLocal(): Promise<ComputeResolution>;
 }
 
 export interface McpServerHooks {
@@ -54,25 +62,28 @@ export interface McpServerHooks {
   readonly version?: string;
 }
 
+const SERVER_VERSION = '0.2.0';
+
 /**
  * Build the MCP server (no transport). Pure-ish: registers tools against the
  * injected deps. Returns the `McpServer` so a caller can `connect()` it to any
  * transport — used by tests and {@link runMcpServer}.
  */
 export function createMcpServer(deps: McpServerDeps, hooks: McpServerHooks = {}): McpServer {
-  const server = new McpServer({ name: hooks.name ?? 'vibedonate', version: hooks.version ?? '0.1.0' });
+  const server = new McpServer({ name: hooks.name ?? 'vibedonate', version: hooks.version ?? SERVER_VERSION });
 
   server.registerTool(
     'status',
     {
       title: 'Donation status',
       description:
-        'Report the current vibedonate config, metering totals (donated / donatedToday / received), and whether the node is sharing capacity right now.',
+        'Report the current vibedonate config, the resolved on-device model, metering totals (donated / donatedToday / received), and whether the node is sharing capacity right now.',
     },
-    () => {
+    async () => {
       const now = deps.now();
       const config = deps.getConfig();
       const ledger = deps.getLedger();
+      const compute = await deps.resolveLocal();
       if (config === null) {
         return {
           isError: false,
@@ -80,7 +91,12 @@ export function createMcpServer(deps: McpServerDeps, hooks: McpServerHooks = {})
             {
               type: 'text' as const,
               text: JSON.stringify(
-                { armed: false, sharing: false, reason: 'not configured — run `vibedonate share`' },
+                {
+                  armed: false,
+                  sharing: false,
+                  compute: { available: compute.available, label: compute.label },
+                  reason: 'not configured — run `vibedonate share`',
+                },
                 null,
                 2,
               ),
@@ -104,6 +120,7 @@ export function createMcpServer(deps: McpServerDeps, hooks: McpServerHooks = {})
                 idle: `${config.idle.start}-${config.idle.end}`,
                 cap: config.cap,
                 pool: config.pool,
+                compute: { available: compute.available, label: compute.label, egress: compute.egress },
                 sharing,
                 totals,
                 now: now.toISOString(),
@@ -122,58 +139,46 @@ export function createMcpServer(deps: McpServerDeps, hooks: McpServerHooks = {})
     {
       title: 'Request donated capacity',
       description:
-        'Pre-flight: ask whether this node can serve `tokens` for `peer`. Checks the donate:compute consent grant, peer authorization (allow-list/org/open), the idle window, local activity, and the daily cap. Returns a decision and a reason. Does not consume capacity.',
+        'Pre-flight: ask whether this node can serve `tokens` for `peer`. Checks the donate:compute consent grant, peer authorization (allow-list/org/open), on-device compute availability, the idle window, local activity, and the daily cap. Returns a decision and a reason. Does not consume capacity.',
       inputSchema: {
         peer: z.string().min(1).describe('The requesting peer id.'),
         tokens: z.number().int().positive().describe('Tokens requested for this request.'),
       },
     },
-    ({ peer, tokens }) => {
+    async ({ peer, tokens }) => {
       const now = deps.now();
       const config = deps.getConfig();
-      const deny = (reason: string) => ({
+      const compute = await deps.resolveLocal();
+      const respond = (decision: 'allow' | 'deny', reason: string, extra: Record<string, unknown> = {}) => ({
         isError: false,
         content: [
           {
             type: 'text' as const,
-            text: JSON.stringify({ decision: 'deny' as const, peer, tokens, reason }, null, 2),
-          },
-        ],
-      });
-      const allow = (remaining: number) => ({
-        isError: false,
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify(
-              { decision: 'allow' as const, peer, tokens, remainingAfter: remaining - tokens },
-              null,
-              2,
-            ),
+            text: JSON.stringify({ decision, peer, tokens, reason, ...extra }, null, 2),
           },
         ],
       });
 
-      if (config === null) return deny('not configured — run `vibedonate share`');
-      if (!config.enabled) return deny('donation is stopped');
-      if (!deps.getConsent().allows(DONATE_COMPUTE_SCOPE)) {
-        return deny('donate:compute consent not granted');
-      }
-      if (authorizePeer(config, peer) === 'deny') {
-        return deny(`peer "${peer}" not authorized by the ${config.pool.kind} pool`);
-      }
+      if (config === null) return respond('deny', 'not configured — run `vibedonate share`');
 
+      const consent = deps.getConsent();
       const ledger = deps.getLedger();
       const totals = ledger.totals(now);
-      if (!isSharingActive(config, now, deps.systemBusy(), totals.donatedToday)) {
-        if (totals.donatedToday >= config.cap) return deny('daily cap reached');
-        if (deps.systemBusy()) return deny('local activity in progress');
-        return deny(`outside idle window ${config.idle.start}-${config.idle.end}`);
-      }
-      const remaining = ledger.remainingToday(config.cap, now);
-      if (tokens > remaining) return deny(`only ${remaining} tokens remain under the daily cap`);
+      const verdict = evaluateCapacity(config, consent, peer, tokens, {
+        now,
+        systemBusy: deps.systemBusy(),
+        donatedToday: totals.donatedToday,
+        localAvailable: compute.available,
+      });
 
-      return allow(remaining);
+      if (verdict.decision === 'deny') {
+        return respond('deny', verdict.reason, { compute: { available: compute.available, label: compute.label } });
+      }
+      const remainingAfter = config.cap - totals.donatedToday - tokens;
+      return respond('allow', verdict.reason, {
+        compute: { available: compute.available, label: compute.label, egress: compute.egress },
+        remainingAfter,
+      });
     },
   );
 
@@ -182,9 +187,9 @@ export function createMcpServer(deps: McpServerDeps, hooks: McpServerHooks = {})
 
 /**
  * Run the server over real stdio, backed by the file stores in `dir`
- * (default `~/.vibedonate`). Resolves only when the transport closes (client
- * disconnect / stdin EOF), so callers that `await` it won't tear the server down
- * the instant `connect()` returns.
+ * (default `~/.vibedonate`) and a real on-device compute probe. Resolves only
+ * when the transport closes (client disconnect / stdin EOF), so callers that
+ * `await` it won't tear the server down the instant `connect()` returns.
  */
 export async function runMcpServer(dir: string = defaultDataDir()): Promise<void> {
   const deps: McpServerDeps = {
@@ -193,6 +198,7 @@ export async function runMcpServer(dir: string = defaultDataDir()): Promise<void
     getConsent: () => createConsentLedger(fileConsentStore(dir)),
     now: () => new Date(),
     systemBusy: () => false, // v0: no real local-activity detector; default not busy.
+    resolveLocal: () => resolveCompute(),
   };
   const server = createMcpServer(deps);
   const transport = new StdioServerTransport();
