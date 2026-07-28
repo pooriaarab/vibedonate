@@ -45,6 +45,13 @@ import {
   type MeteringLedger,
   type RecipientPool,
 } from './index.js';
+import type {
+  Chain,
+  PaymentLedger,
+  PaymentProof,
+  PaymentTerms,
+  Wallet,
+} from './payment.js';
 
 /* -------------------------------------------------------------------------- */
 /* Topic derivation                                                           */
@@ -95,6 +102,12 @@ export const MAX_ID_LEN = 64;
 export const MAX_PROMPT_LEN = 8_000;
 export const MAX_OUTPUT_LEN = 16_000;
 export const MAX_REASON_LEN = 256;
+/** Max length of an advertised on-chain receiving address (`payTo`). */
+export const MAX_ADDR_LEN = 64;
+/** Max length of a settlement reference (`txRef`: on-chain hash or `stub:…`). */
+export const MAX_TXREF_LEN = 128;
+/** Max length of an optional payment signature. */
+export const MAX_SIG_LEN = 256;
 /**
  * Per-line ceiling sized to admit the LARGEST legal frame after JSON escaping
  * (worst case every char is escaped → ~2×). Generous slack on top.
@@ -103,8 +116,26 @@ const MAX_FRAME_LEN = Math.max(MAX_PROMPT_LEN, MAX_OUTPUT_LEN) * 2 + 2_048;
 
 /** The ONLY three frames on the wire. `hello` is frame #1 on every connection. */
 export type Frame =
-  | { readonly t: 'hello'; readonly handle: string; readonly pool: string; readonly capacityTier: string }
-  | { readonly t: 'job'; readonly id: string; readonly prompt: string }
+  | {
+      readonly t: 'hello';
+      readonly handle: string;
+      readonly pool: string;
+      readonly capacityTier: string;
+      /**
+       * Present ONLY when the donor charges per job (x402). Advertises the price
+       * + receiving address — never raw usage. Absent on a FREE donor.
+       */
+      readonly priceUsdc?: number;
+      readonly payTo?: string;
+      readonly chain?: Chain;
+    }
+  | {
+      readonly t: 'job';
+      readonly id: string;
+      readonly prompt: string;
+      /** Present ONLY when paying a priced donor. A {@link PaymentProof}; no usage. */
+      readonly payment?: PaymentProof;
+    }
   | {
       readonly t: 'result';
       readonly id: string;
@@ -123,15 +154,36 @@ export type PeerHello = Extract<Frame, { t: 'hello' }>;
  */
 export function serializeFrame(f: Frame): string {
   switch (f.t) {
-    case 'hello':
-      return JSON.stringify({
+    case 'hello': {
+      // Built key-by-key from the allow-list — extra caller props can't leak.
+      const base: Record<string, unknown> = {
         t: 'hello',
         handle: f.handle,
         pool: f.pool,
         capacityTier: f.capacityTier,
-      });
-    case 'job':
-      return JSON.stringify({ t: 'job', id: f.id, prompt: f.prompt });
+      };
+      // Advertise payment terms ONLY when the donor is priced. Never raw usage.
+      if (typeof f.priceUsdc === 'number' && f.priceUsdc > 0) {
+        base['priceUsdc'] = f.priceUsdc;
+        if (typeof f.payTo === 'string' && f.payTo.length > 0) base['payTo'] = f.payTo;
+        if (typeof f.chain === 'string') base['chain'] = f.chain;
+      }
+      return JSON.stringify(base);
+    }
+    case 'job': {
+      const base: Record<string, unknown> = { t: 'job', id: f.id, prompt: f.prompt };
+      // Attach payment proof ONLY when present (priced donor). No usage data.
+      if (f.payment !== undefined) {
+        const p: Record<string, unknown> = {
+          payer: f.payment.payer,
+          amountUsdc: f.payment.amountUsdc,
+          txRef: f.payment.txRef,
+        };
+        if (typeof f.payment.sig === 'string') p['sig'] = f.payment.sig;
+        base['payment'] = p;
+      }
+      return JSON.stringify(base);
+    }
     case 'result': {
       // Optional denied/reason are only emitted when present, never as `undefined`.
       const base: Record<string, unknown> = { t: 'result', id: f.id, output: f.output };
@@ -166,20 +218,36 @@ export function parseFrame(raw: string | Buffer): Frame | null {
       const tier = r['capacityTier'];
       if (typeof handle !== 'string' || handle.length === 0 || handle.length > MAX_HANDLE_LEN) return null;
       if (typeof pool !== 'string' || pool.length === 0 || pool.length > MAX_POOL_LEN) return null;
-      return {
-        t: 'hello',
-        handle,
-        pool,
-        capacityTier:
-          typeof tier === 'string' && tier.length > 0 && tier.length <= MAX_TIER_LEN ? tier : 'compute',
-      };
+      const capacityTier =
+        typeof tier === 'string' && tier.length > 0 && tier.length <= MAX_TIER_LEN ? tier : 'compute';
+      // OPTIONAL x402 payment terms — accepted only when well-formed + priced.
+      // A FREE donor's hello stays exactly {t,handle,pool,capacityTier}.
+      const priceUsdc = r['priceUsdc'];
+      if (typeof priceUsdc === 'number' && Number.isFinite(priceUsdc) && priceUsdc > 0) {
+        const payTo = r['payTo'];
+        const chain = r['chain'];
+        return {
+          t: 'hello',
+          handle,
+          pool,
+          capacityTier,
+          priceUsdc,
+          ...(typeof payTo === 'string' && payTo.length > 0 && payTo.length <= MAX_ADDR_LEN ? { payTo } : {}),
+          ...(chain === 'base' || chain === 'ethereum' || chain === 'polygon' ? { chain } : {}),
+        };
+      }
+      return { t: 'hello', handle, pool, capacityTier };
     }
     case 'job': {
       const id = r['id'];
       const prompt = r['prompt'];
       if (typeof id !== 'string' || id.length === 0 || id.length > MAX_ID_LEN) return null;
       if (typeof prompt !== 'string' || prompt.length > MAX_PROMPT_LEN) return null;
-      return { t: 'job', id, prompt };
+      // OPTIONAL payment proof — accepted only when well-formed. No usage data.
+      const payment = parsePaymentProofField(r['payment']);
+      return payment === null
+        ? { t: 'job', id, prompt }
+        : { t: 'job', id, prompt, payment };
     }
     case 'result': {
       const id = r['id'];
@@ -204,6 +272,25 @@ export function parseFrame(raw: string | Buffer): Frame | null {
     default:
       return null;
   }
+}
+
+/**
+ * Pull a {@link PaymentProof} out of an incoming `job` frame's `payment` field.
+ * Returns `null` for anything malformed — built key-by-key from the allow-list
+ * so extra fields a peer sneaks onto the proof are dropped (no raw-usage leak).
+ */
+function parsePaymentProofField(raw: unknown): PaymentProof | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const payer = r['payer'];
+  const amountUsdc = r['amountUsdc'];
+  const txRef = r['txRef'];
+  const sig = r['sig'];
+  if (typeof payer !== 'string' || payer.length === 0 || payer.length > MAX_HANDLE_LEN) return null;
+  if (typeof amountUsdc !== 'number' || !Number.isFinite(amountUsdc) || amountUsdc <= 0) return null;
+  if (typeof txRef !== 'string' || txRef.length === 0 || txRef.length > MAX_TXREF_LEN) return null;
+  if (sig !== undefined && (typeof sig !== 'string' || sig.length > MAX_SIG_LEN)) return null;
+  return { payer, amountUsdc, txRef, ...(typeof sig === 'string' ? { sig } : {}) };
 }
 
 /** Random 32-byte topic for tests/local experiments — never a real pool topic. */
@@ -309,6 +396,18 @@ export interface DonorOptions {
   readonly ledger: MeteringLedger;
   /** Local model stub. Defaults to {@link createEchoModel}. */
   readonly model?: LocalModel;
+  /**
+   * x402 wallet. REQUIRED when `config.priceUsdc > 0` — it advertises `payTo`
+   * (its address) in the donor hello and verifies incoming PaymentProofs.
+   * Ignored for FREE donors (price 0).
+   */
+  readonly wallet?: Wallet;
+  /**
+   * Hash-chained ledger of received payments; records one entry per priced job
+   * SERVED. Ignored for FREE donors; optional even when priced (in-memory only
+   * if omitted).
+   */
+  readonly paymentLedger?: PaymentLedger;
   /** Override the joined topic (tests pass a random one on an isolated DHT). */
   readonly topic?: Buffer;
   /** DHT bootstrap nodes; omit for the public DHT. Tests pass a local testnet. */
@@ -350,6 +449,8 @@ export async function startDonor(opts: DonorOptions): Promise<DonorSession> {
     model = createEchoModel(),
     now = () => new Date(),
     systemBusy = () => false,
+    wallet,
+    paymentLedger,
   } = opts;
 
   // CONSENT GATE AT JOIN — the caller (CLI) must already hold the grant, exactly
@@ -358,14 +459,33 @@ export async function startDonor(opts: DonorOptions): Promise<DonorSession> {
   if (!consent.allows(DONATE_COMPUTE_SCOPE)) {
     throw new Error('donate:compute consent not granted — refusing to join the mesh as a donor');
   }
+  // A PRICED donor (priceUsdc > 0) needs a wallet to advertise `payTo` and to
+  // verify incoming PaymentProofs. FREE donors (price 0) need neither and take
+  // the unchanged free path.
+  if (config.priceUsdc > 0 && wallet === undefined) {
+    throw new Error('a priced donor (priceUsdc > 0) needs a wallet to advertise payTo + verify payments');
+  }
 
   const topic = opts.topic ?? poolTopic(config.pool);
-  const hello: PeerHello = {
-    t: 'hello',
-    handle,
-    pool: poolTopicKey(config.pool),
-    capacityTier: config.tier,
-  };
+
+  // x402: advertise payment terms ONLY when priced. A FREE donor's hello stays
+  // exactly {t,handle,pool,capacityTier} — privacy-preserving by default.
+  const terms: PaymentTerms | null =
+    config.priceUsdc > 0 && wallet !== undefined
+      ? { priceUsdc: config.priceUsdc, chain: config.chain, payTo: wallet.address() }
+      : null;
+  const hello: PeerHello =
+    terms === null
+      ? { t: 'hello', handle, pool: poolTopicKey(config.pool), capacityTier: config.tier }
+      : {
+          t: 'hello',
+          handle,
+          pool: poolTopicKey(config.pool),
+          capacityTier: config.tier,
+          priceUsdc: terms.priceUsdc,
+          payTo: terms.payTo,
+          chain: terms.chain,
+        };
 
   // Lazy import so non-mesh commands (`status`, `mcp`, `--help`) never pay for
   // hyperswarm's native stack (udx/sodium) — it loads on first donor/consumer.
@@ -403,8 +523,19 @@ export async function startDonor(opts: DonorOptions): Promise<DonorSession> {
     });
   });
 
-  /** GATE + run, all on the donor. No work happens unless every gate is green. */
-  const handleJob = (socket: Duplex, remoteKey: string, job: { readonly id: string; readonly prompt: string }): void => {
+  /**
+   * GATE + run, all on the donor. No work happens unless every gate is green.
+   *
+   * Gate order: handshake → consent → authorizePeer → PAYMENT (if priced) →
+   * isSharingActive → run → record metering receipt AND (for priced jobs) a
+   * payment record. Async because a real wallet's `verify` is async; the stub
+   * resolves on the next microtask.
+   */
+  const handleJob = async (
+    socket: Duplex,
+    remoteKey: string,
+    job: { readonly id: string; readonly prompt: string; readonly payment?: PaymentProof },
+  ): Promise<void> => {
     const deny = (reason: string): void => {
       jobsDenied += 1;
       socket.write(`${serializeFrame({ t: 'result', id: job.id, output: '', denied: true, reason })}\n`);
@@ -428,7 +559,22 @@ export async function startDonor(opts: DonorOptions): Promise<DonorSession> {
       deny(`peer "${peer.handle}" not authorized by the ${config.pool.kind} pool`);
       return;
     }
-    // GATE 3 — capacity: enabled + inside idle window + under cap + not busy.
+    // GATE 3 — PAYMENT (x402, only when priced). The proof must verify via the
+    // wallet, be FROM this peer, and cover the advertised price. A missing or
+    // invalid proof is denied 'payment required' BEFORE capacity is checked.
+    if (terms !== null) {
+      const proof = job.payment;
+      if (proof === undefined || wallet === undefined) {
+        deny('payment required');
+        return;
+      }
+      const verified = await wallet.verify(proof);
+      if (!verified || proof.payer !== peer.handle || proof.amountUsdc < terms.priceUsdc) {
+        deny('payment required');
+        return;
+      }
+    }
+    // GATE 4 — capacity: enabled + inside idle window + under cap + not busy.
     const t = now();
     const donatedToday = ledger.totals(t).donatedToday;
     if (!isSharingActive(config, t, systemBusy(), donatedToday)) {
@@ -444,7 +590,7 @@ export async function startDonor(opts: DonorOptions): Promise<DonorSession> {
       return;
     }
 
-    // ALL GREEN — run the local stub and record a hash-chained receipt.
+    // ALL GREEN — run the local stub and record a hash-chained metering receipt.
     const result = model.run(job.prompt);
     ledger.record({
       peer: peer.handle,
@@ -452,6 +598,19 @@ export async function startDonor(opts: DonorOptions): Promise<DonorSession> {
       model: model.id,
       direction: 'donated',
     });
+    // x402: also record the SETTLED payment (hash-chained, like the metering
+    // ledger). Only a served priced job mints a payment record — so the ledger
+    // is an audit trail of payments actually received for served compute.
+    const payment = job.payment;
+    if (terms !== null && payment !== undefined && paymentLedger !== undefined) {
+      paymentLedger.record({
+        peer: peer.handle,
+        amountUsdc: payment.amountUsdc,
+        direction: 'received',
+        txRef: payment.txRef,
+        ts: t.toISOString(),
+      });
+    }
     jobsRun += 1;
     socket.write(`${serializeFrame({ t: 'result', id: job.id, output: result.output })}\n`);
   };
@@ -512,6 +671,18 @@ export interface ConsumerOptions {
   readonly pool: RecipientPool;
   /** Tier we say we want. Purely informational metadata in v0. */
   readonly capacityTier?: string;
+  /**
+   * x402 wallet used to PAY priced donors. When a targeted donor advertises a
+   * price, the consumer charges `wallet.charge(handle, price)` and attaches the
+   * resulting PaymentProof to the job. Omit to refuse payment (a priced donor
+   * will then deny the job 'payment required').
+   */
+  readonly wallet?: Wallet;
+  /**
+   * Hash-chained ledger of payments SENT; records one entry per priced job that
+   * actually succeeded. Optional (in-memory only if omitted).
+   */
+  readonly paymentLedger?: PaymentLedger;
   /** Override the joined topic (tests pass a random one on an isolated DHT). */
   readonly topic?: Buffer;
   /** DHT bootstrap nodes; omit for the public DHT. Tests pass a local testnet. */
@@ -550,7 +721,7 @@ export interface ConsumerSession {
    * accepted job); returns the first non-denied result, else the denial.
    * Resolves to `null` only if no donor handshakes within the timeout.
    */
-  request(prompt: string, opts?: { readonly timeoutMs?: number }): Promise<JobResult | null>;
+  request(prompt: string, opts?: { readonly timeoutMs?: number; readonly payUsdc?: number }): Promise<JobResult | null>;
   close(): Promise<void>;
 }
 
@@ -560,7 +731,7 @@ export interface ConsumerSession {
  * donating; the DONOR gates every job.
  */
 export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSession> {
-  const { handle, pool, capacityTier = 'compute' } = opts;
+  const { handle, pool, capacityTier = 'compute', wallet, paymentLedger } = opts;
   const topic = opts.topic ?? poolTopic(pool);
   const hello: PeerHello = { t: 'hello', handle, pool: poolTopicKey(pool), capacityTier };
 
@@ -595,7 +766,17 @@ export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSess
       const frame = parseFrame(line);
       if (frame === null) return;
       if (frame.t === 'hello') {
-        const peer: PeerHello = { t: 'hello', handle: frame.handle, pool: frame.pool, capacityTier: frame.capacityTier };
+        // Preserve an advertised price (priceUsdc/payTo/chain) so request() knows
+        // what to pay — a FREE donor's hello carries none of these.
+        const peer: PeerHello = {
+          t: 'hello',
+          handle: frame.handle,
+          pool: frame.pool,
+          capacityTier: frame.capacityTier,
+          ...(frame.priceUsdc !== undefined ? { priceUsdc: frame.priceUsdc } : {}),
+          ...(frame.payTo !== undefined ? { payTo: frame.payTo } : {}),
+          ...(frame.chain !== undefined ? { chain: frame.chain } : {}),
+        };
         if (peer.pool !== hello.pool) return; // different pool on this topic → drop
         peers.set(remoteKey, peer);
         donors.set(remoteKey, { hello: peer, socket });
@@ -622,9 +803,32 @@ export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSess
   }, REFRESH_INTERVAL_MS);
   refresher.unref();
 
-  /** Send a job to one donor and await its result (per-donor timeout). */
-  const askDonor = (donor: ReadyDonor, prompt: string, timeoutMs: number): Promise<JobResult> => {
+  /**
+   * Send a job to one donor and await its result (per-donor timeout). When the
+   * donor is priced, charges the wallet and attaches a PaymentProof first; on a
+   * SUCCESSFUL result records a 'sent' payment to the payment ledger.
+   */
+  const askDonor = async (
+    donor: ReadyDonor,
+    prompt: string,
+    timeoutMs: number,
+    payUsdc?: number,
+  ): Promise<JobResult> => {
     const id = randomJobId();
+    // x402: if this donor advertises a price, charge via the wallet and attach
+    // a proof. No wallet / failed charge → no proof → a priced donor denies
+    // 'payment required'; a FREE donor ignores payment entirely.
+    let payment: PaymentProof | undefined;
+    const priceUsdc = donor.hello.priceUsdc;
+    if (typeof priceUsdc === 'number' && priceUsdc > 0) {
+      const amount = payUsdc ?? priceUsdc;
+      if (wallet !== undefined) {
+        const r = await wallet.charge(handle, amount);
+        if (r.paid && typeof r.txRef === 'string' && r.txRef.length > 0) {
+          payment = { payer: handle, amountUsdc: amount, txRef: r.txRef };
+        }
+      }
+    }
     return new Promise<JobResult>((resolve) => {
       const timer = setTimeout(() => {
         if (pending.delete(id)) resolve({ output: '', donor: donor.hello.handle, denied: true, reason: 'timeout' });
@@ -633,6 +837,15 @@ export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSess
         socket: donor.socket,
         resolve: (result) => {
           clearTimeout(timer);
+          // x402: record a 'sent' payment ONLY when the job actually succeeded.
+          if (payment !== undefined && result.denied !== true && paymentLedger !== undefined) {
+            paymentLedger.record({
+              peer: donor.hello.handle,
+              amountUsdc: payment.amountUsdc,
+              direction: 'sent',
+              txRef: payment.txRef,
+            });
+          }
           resolve({
             output: result.output,
             donor: donor.hello.handle,
@@ -645,7 +858,9 @@ export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSess
           resolve({ output: '', donor: donor.hello.handle, denied: true, reason: 'disconnected' });
         },
       });
-      donor.socket.write(`${serializeFrame({ t: 'job', id, prompt })}\n`);
+      donor.socket.write(
+        `${serializeFrame({ t: 'job', id, prompt, ...(payment !== undefined ? { payment } : {}) })}\n`,
+      );
     });
   };
 
@@ -668,16 +883,17 @@ export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSess
     async request(prompt, ropts = {}): Promise<JobResult | null> {
       const overallMs = ropts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
       const perDonorMs = Math.min(overallMs, PER_DONOR_TIMEOUT_MS);
+      const payUsdc = ropts.payUsdc;
       // Give the swarm a beat to discover + handshake at least one donor.
       await waitForDonors(1, overallMs);
       if (donors.size === 0) return null;
 
       // Snapshot then try donors in order. Stop at the first non-denied answer;
-      // a denial means that donor is not authorized/green, so try the next.
+      // a denial means that donor is not authorized/green/paid, so try the next.
       const snapshot = [...donors.values()];
       let last: JobResult | null = null;
       for (const donor of snapshot) {
-        const result = await askDonor(donor, prompt, perDonorMs);
+        const result = await askDonor(donor, prompt, perDonorMs, payUsdc);
         last = result;
         if (result.denied !== true) return result; // landed on a green donor
       }

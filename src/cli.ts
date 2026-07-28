@@ -22,23 +22,30 @@ import { createConsentLedger } from '@pooriaarab/vibe-core';
 import {
   createDonationConfig,
   createMeteringLedger,
+  createPaymentLedger,
   defaultDataDir,
   DONATE_COMPUTE_SCOPE,
   fileConsentStore,
   fileMeteringStore,
+  filePaymentStore,
   isSharingActive,
   loadConfigFromFile,
   parsePool,
+  parsePriceUsdc,
   publishDonationEvent,
   resolveCompute,
   saveConfigToFile,
+  stubWallet,
+  type Chain,
   type ComputeResolution,
   type DonationConfig,
+  type PaymentRecord,
+  type PaymentTotals,
   type RecipientPool,
 } from './index.js';
 
 /** Matches package.json — single source for the `--version` string. */
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 export type ParsedCommand =
   | { readonly kind: 'help' }
@@ -53,15 +60,19 @@ export type ParsedCommand =
       readonly pool: RecipientPool;
       readonly handle: string;
       readonly timeoutMs?: number;
-    };
+      /** Per-job USDC the consumer is willing to pay; omitted = auto-read donor price. */
+      readonly payUsdc?: number;
+    }
+  | { readonly kind: 'wallet' };
 
 const HELP = `vibedonate ${VERSION} — donate spare local compute across agentic CLIs.
 
 USAGE
-  vibedonate share --compute --idle <HH:MM-HH:MM> --cap <n|2M> --pool <pool>
-  vibedonate request "<prompt>" --pool <pool> [--handle <peer>] [--timeout <ms>]
+  vibedonate share --compute --idle <HH:MM-HH:MM> --cap <n|2M> --pool <pool> [--price <usdc>]
+  vibedonate request "<prompt>" --pool <pool> [--handle <peer>] [--timeout <ms>] [--pay <usdc>]
   vibedonate status
   vibedonate stop
+  vibedonate wallet
   vibedonate mcp
   vibedonate --version | --help
 
@@ -73,16 +84,25 @@ COMMANDS
            --cap N|2M|500k     max tokens donated per UTC day
            --pool open|org:id[,member...]|allowlist:peer,peer
            --handle <name>     your donor id on the mesh (default: hostname)
+           --price <usdc>      x402: charge per job in USDC (default 0 = FREE).
+                                When set, jobs are refused without a valid
+                                PaymentProof. FREE stays the default.
+           --chain base|ethereum|polygon  settlement chain (default base)
 
   request  Route ONE job to an authorized, capacity-green donor on the pool.
            Prints the result on stdout (exit 0) or a denial on stderr (exit 1).
            --pool <pool>       must match a donor's pool definition (same topic)
            --handle <peer>     your id - must be in an allowlist/org pool roster
            --timeout <ms>      discovery + run budget (default 15000)
+           --pay <usdc>        x402: offer per job (default: auto-read the
+                                donor's advertised price). A priced donor denies
+                                with 'payment required' if payment is missing.
 
   status   Show config, metering totals, the resolved local model, and whether
            sharing right now.
   stop     Disable donation (revokes the donate:compute consent grant).
+  wallet   Show your x402 wallet address + a hash-chained ledger of payments
+           received (as a donor) and sent (as a consumer).
   mcp      Run the MCP server over stdio (tools: status, request_capacity).
 
 LOCAL COMPUTE
@@ -92,13 +112,22 @@ LOCAL COMPUTE
 
 MESH
   Donors + consumers discover each other over the hyperswarm DHT on a topic
-  derived from the pool. Handshakes carry ONLY { handle, pool, tier } - raw
-  usage is never shared. The donor gates every job on consent + pool auth +
-  capacity BEFORE any work runs, and records a hash-chained metering receipt.
+  derived from the pool. Handshakes carry ONLY { handle, pool, tier } (and, for
+  a priced donor, the price + receiving address) - raw usage is NEVER shared.
+  The donor gates every job on consent + pool auth + PAYMENT (if priced) +
+  capacity BEFORE any work runs, then records a hash-chained metering receipt
+  (and, for priced jobs, a payment record).
+
+PAYMENTS (x402)
+  FREE is the default: price 0 donors never build PaymentTerms and free jobs
+  are byte-for-byte unchanged. A donor that sets --price charges USDC per job
+  via the open HTTP 402 standard. v0 does NOT do real on-chain settlement - a
+  deterministic stub wallet (always 'paid') exercises the gate end-to-end; a
+  real USDC wallet implements the Wallet interface and drops in unchanged.
 
 DATA
   State lives in $VIBEDONATE_DIR (default ~/.vibedonate): config.json,
-  consent.json, metering.json.
+  consent.json, metering.json, payments.json.
 
 NOTE
   v0 is the local-compute tier only. Routing a peer's inference through your
@@ -126,6 +155,8 @@ export function parseArgs(argv: readonly string[]): ParsedCommand {
       return { kind: 'stop' };
     case 'mcp':
       return { kind: 'mcp' };
+    case 'wallet':
+      return { kind: 'wallet' };
     default:
       throw new Error(`unknown command: ${JSON.stringify(cmd)}. See 'vibedonate --help'.`);
   }
@@ -141,6 +172,8 @@ function parseShare(opts: readonly string[]): {
   let pool: string | undefined;
   let handle: string | undefined;
   let compute = false;
+  let price: string | undefined;
+  let chain: string | undefined;
 
   const takeValue = (flag: string, raw: string, advance: () => string | undefined): string => {
     const eq = raw.indexOf('=');
@@ -174,6 +207,15 @@ function parseShare(opts: readonly string[]): {
       handle = takeValue('--handle', a, advance);
       continue;
     }
+    if (a === '--price' || a.startsWith('--price=')) {
+      // x402 per-job USDC price (e.g. --price 0.001). Default 0 = FREE.
+      price = takeValue('--price', a, advance);
+      continue;
+    }
+    if (a === '--chain' || a.startsWith('--chain=')) {
+      chain = takeValue('--chain', a, advance);
+      continue;
+    }
     throw new Error(`unexpected option: ${JSON.stringify(a)}`);
   }
 
@@ -182,12 +224,28 @@ function parseShare(opts: readonly string[]): {
   if (cap === undefined) throw new Error('--cap is required (e.g. --cap 2000000 or --cap 2M)');
   if (pool === undefined) throw new Error('--pool is required (open|org:id|allowlist:peers)');
 
+  const resolvedChain = chain === undefined ? undefined : parseChain(chain);
   return {
-    config: createDonationConfig({ idle, cap, pool }),
+    config: createDonationConfig({
+      idle,
+      cap,
+      pool,
+      ...(price === undefined ? {} : { price }),
+      ...(resolvedChain === undefined ? {} : { chain: resolvedChain }),
+    }),
     // Cap at the mesh handshake MAX_HANDLE_LEN so an over-long hostname can't
     // make our own hello fail validation on the wire.
     handle: (handle ?? hostname()).slice(0, 64),
   };
+}
+
+/** Validate a --chain value into the x402 Chain union. Throws on unknown chain. */
+function parseChain(raw: string): Chain {
+  const v = raw.trim().toLowerCase();
+  if (v !== 'base' && v !== 'ethereum' && v !== 'polygon') {
+    throw new Error(`--chain must be base|ethereum|polygon (got ${JSON.stringify(raw)})`);
+  }
+  return v;
 }
 
 /** Parse `request` options into a consumer command. Pure: no IO. Throws on error. */
@@ -196,6 +254,7 @@ function parseRequest(opts: readonly string[]): Extract<ParsedCommand, { kind: '
   let pool: string | undefined;
   let handle = 'consumer';
   let timeoutMs: number | undefined;
+  let pay: string | undefined;
 
   const takeValue = (flag: string, raw: string, advance: () => string | undefined): string => {
     const eq = raw.indexOf('=');
@@ -226,6 +285,12 @@ function parseRequest(opts: readonly string[]): Extract<ParsedCommand, { kind: '
       timeoutMs = Math.floor(n);
       continue;
     }
+    if (a === '--pay' || a.startsWith('--pay=')) {
+      // x402: per-job USDC to offer a priced donor. Omitted = auto-read the
+      // donor's advertised price. A FREE donor ignores payment entirely.
+      pay = takeValue('--pay', a, advance);
+      continue;
+    }
     if (a.startsWith('--')) throw new Error(`unexpected option: ${JSON.stringify(a)}`);
     // First non-flag token is the prompt (shell-passed, may be quoted).
     if (prompt === undefined) {
@@ -241,12 +306,14 @@ function parseRequest(opts: readonly string[]): Extract<ParsedCommand, { kind: '
   if (pool === undefined) {
     throw new Error("--pool is required (must match a donor's pool definition)");
   }
+  const payUsdc = pay === undefined ? undefined : parsePriceUsdc(pay);
   return {
     kind: 'request',
     prompt,
     pool: parsePool(pool),
     handle: handle.slice(0, 64),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(payUsdc === undefined ? {} : { payUsdc }),
   };
 }
 
@@ -286,6 +353,35 @@ export function renderStatus(
   }
   lines.push(`  usage:    donated ${totals.donated.toLocaleString('en-US')} (today ${donatedToday.toLocaleString('en-US')}) \u00B7 received ${totals.received.toLocaleString('en-US')} \u00B7 ${totals.count} receipt(s)`);
   lines.push(`  sharing:  ${sharing ? 'yes' : 'no'} (now ${now.toISOString()})`);
+  return `${lines.join('\n')}\n`;
+}
+
+/**
+ * Render the x402 wallet view: the node's receiving address + a ledger of
+ * payments made (sent) and received, with hash-chain-verified totals. Pure
+ * string building — no IO.
+ */
+export function renderWallet(
+  address: string,
+  totals: PaymentTotals,
+  records: readonly PaymentRecord[],
+  chain?: string,
+): string {
+  const lines: string[] = [];
+  lines.push(`vibedonate wallet — ${address}${chain !== undefined ? ` (${chain})` : ''}`);
+  lines.push(
+    `  payments: received ${totals.received} USDC \u00B7 sent ${totals.sent} USDC \u00B7 ${totals.count} record(s)`,
+  );
+  if (records.length === 0) {
+    lines.push('  (no payments yet \u2014 priced jobs record here once served/paid)');
+  } else {
+    for (const r of records) {
+      const arrow = r.direction === 'received' ? '\u2190' : '\u2192';
+      lines.push(
+        `  #${r.seq} ${r.ts}  ${arrow} ${r.peer}  ${r.amountUsdc} USDC  ${r.txRef}`,
+      );
+    }
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -332,6 +428,12 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
         config: cmd.config,
         consent: createConsentLedger(fileConsentStore(dir)),
         ledger,
+        // x402: arm a wallet (the donor's receiving address) + a payment ledger.
+        // A priced donor (priceUsdc > 0) needs the wallet to advertise payTo and
+        // verify payments; a FREE donor ignores both. Seeded by the donor handle
+        // so the advertised payTo is stable and matches `vibedonate wallet`.
+        wallet: stubWallet(cmd.handle),
+        paymentLedger: createPaymentLedger(filePaymentStore(dir)),
       });
       process.stdout.write(
         `joined mesh as donor "${cmd.handle}" on pool "${poolTopicKey(cmd.config.pool)}" — Ctrl-C to stop.\n`,
@@ -373,14 +475,21 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
     case 'request': {
       // Consumer: route ONE job to an authorized, capacity-green donor on the
       // pool. The consumer holds no consent grant — it is requesting capacity;
-      // the DONOR gates every job.
+      // the DONOR gates every job. A wallet is always armed so we CAN pay a
+      // priced donor (auto-reads its advertised price, or --pay overrides);
+      // sent payments are recorded to the payment ledger.
       const { startConsumer } = await import('./mesh.js');
-      const session = await startConsumer({ handle: cmd.handle, pool: cmd.pool });
+      const session = await startConsumer({
+        handle: cmd.handle,
+        pool: cmd.pool,
+        wallet: stubWallet(cmd.handle),
+        paymentLedger: createPaymentLedger(filePaymentStore(dir)),
+      });
       try {
-        const result = await session.request(
-          cmd.prompt,
-          cmd.timeoutMs === undefined ? {} : { timeoutMs: cmd.timeoutMs },
-        );
+        const result = await session.request(cmd.prompt, {
+          ...(cmd.timeoutMs === undefined ? {} : { timeoutMs: cmd.timeoutMs }),
+          ...(cmd.payUsdc === undefined ? {} : { payUsdc: cmd.payUsdc }),
+        });
         if (result === null) {
           process.stderr.write('vibedonate: no donor available on the pool\n');
           return 1;
@@ -400,6 +509,19 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
     case 'mcp': {
       const { runMcpServer } = await import('./mcp.js');
       await runMcpServer(dir);
+      return 0;
+    }
+    case 'wallet': {
+      // x402: show the node's wallet address + the hash-chained payment ledger
+      // (both payments RECEIVED when this node donated compute, and SENT when it
+      // consumed a priced donor). The address is seeded by hostname so it matches
+      // the default donor's advertised payTo (`vibedonate share` with no --handle).
+      const config = loadConfigFromFile(dir);
+      const wallet = stubWallet(hostname());
+      const ledger = createPaymentLedger(filePaymentStore(dir));
+      process.stdout.write(
+        renderWallet(wallet.address(), ledger.totals(), ledger.all(), config?.chain),
+      );
       return 0;
     }
     default: {

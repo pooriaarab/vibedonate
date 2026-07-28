@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseArgs } from './cli.js';
+import { createPaymentLedger } from './index.js';
+import { parseArgs, renderWallet } from './cli.js';
 
 describe('parseArgs', () => {
   it('routes global flags', () => {
@@ -94,6 +95,39 @@ describe('parseArgs', () => {
     expect(typeof without.handle).toBe('string');
     expect(without.handle.length).toBeGreaterThan(0);
   });
+
+  it('share arms the payment gate with --price (decimal) + --chain', () => {
+    const priced = parseArgs([
+      'share', '--compute', '--idle', '22:00-07:00', '--cap', '1000', '--pool', 'open',
+      '--price', '0.001', '--chain', 'base',
+    ]);
+    expect(priced.kind).toBe('share');
+    if (priced.kind !== 'share') return;
+    expect(priced.config.priceUsdc).toBe(0.001);
+    expect(priced.config.chain).toBe('base');
+
+    const poly = parseArgs([
+      'share', '--compute', '--idle=09:00-17:00', '--cap=1000', '--pool=open', '--price=1.5', '--chain=polygon',
+    ]);
+    expect(poly.kind).toBe('share');
+    if (poly.kind !== 'share') return;
+    expect(poly.config.priceUsdc).toBe(1.5);
+    expect(poly.config.chain).toBe('polygon');
+  });
+
+  it('share stays FREE by default (priceUsdc 0) and rejects a bad chain/price', () => {
+    const free = parseArgs(['share', '--compute', '--idle', '22:00-07:00', '--cap', '1000', '--pool', 'open']);
+    expect(free.kind).toBe('share');
+    if (free.kind !== 'share') return;
+    expect(free.config.priceUsdc).toBe(0);
+
+    expect(() =>
+      parseArgs(['share', '--compute', '--idle', '22:00-07:00', '--cap', '1000', '--pool', 'open', '--chain', 'solana']),
+    ).toThrow(/chain/);
+    expect(() =>
+      parseArgs(['share', '--compute', '--idle', '22:00-07:00', '--cap', '1000', '--pool', 'open', '--price', '0']),
+    ).toThrow(/positive/);
+  });
 });
 
 describe('parseArgs (request)', () => {
@@ -118,6 +152,27 @@ describe('parseArgs (request)', () => {
     expect(cmd.timeoutMs).toBe(8000);
   });
 
+  it('accepts --pay <usdc> (x402) and surfaces a bad price', () => {
+    const cmd = parseArgs(['request', 'hello', '--pool', 'open', '--pay', '0.001']);
+    expect(cmd.kind).toBe('request');
+    if (cmd.kind !== 'request') return;
+    expect(cmd.payUsdc).toBe(0.001);
+
+    const joined = parseArgs(['request', 'hello', '--pool=open', '--pay=1.5']);
+    expect(joined.kind).toBe('request');
+    if (joined.kind !== 'request') return;
+    expect(joined.payUsdc).toBe(1.5);
+
+    // --pay defaults to omitted (auto-read the donor's advertised price).
+    const none = parseArgs(['request', 'hello', '--pool', 'open']);
+    expect(none.kind).toBe('request');
+    if (none.kind !== 'request') return;
+    expect(none.payUsdc).toBeUndefined();
+
+    expect(() => parseArgs(['request', 'hello', '--pool', 'open', '--pay', '0'])).toThrow(/positive/);
+    expect(() => parseArgs(['request', 'hello', '--pool', 'open', '--pay', 'free'])).toThrow(/invalid price/);
+  });
+
   it('requires a prompt and --pool', () => {
     expect(() => parseArgs(['request', '--pool', 'open'])).toThrow(/prompt/);
     expect(() => parseArgs(['request', 'hi'])).toThrow(/--pool/);
@@ -137,5 +192,38 @@ describe('parseArgs (request)', () => {
 
   it('surfaces pool validation errors from parsePool', () => {
     expect(() => parseArgs(['request', 'hi', '--pool', 'nonsense:foo'])).toThrow();
+  });
+});
+
+describe('parseArgs (wallet)', () => {
+  it('routes the wallet command', () => {
+    expect(parseArgs(['wallet'])).toEqual({ kind: 'wallet' });
+  });
+});
+
+describe('renderWallet', () => {
+  it('shows the address + an empty-state message when there are no payments', () => {
+    const out = renderWallet('0xabc', { received: 0, sent: 0, count: 0 }, []);
+    expect(out).toContain('0xabc');
+    expect(out).toContain('received 0 USDC');
+    expect(out).toContain('sent 0 USDC');
+    expect(out).toContain('no payments yet');
+  });
+
+  it('lists received + sent records with peer, amount, and txRef', () => {
+    const ledger = createPaymentLedger();
+    ledger.record({ peer: 'alice', amountUsdc: 0.5, direction: 'received', txRef: 'stub:a' });
+    ledger.record({ peer: 'donor1', amountUsdc: 0.25, direction: 'sent', txRef: 'stub:b' });
+
+    const out = renderWallet('0xabc', ledger.totals(), ledger.all());
+    expect(out).toContain('received 0.5 USDC');
+    expect(out).toContain('sent 0.25 USDC');
+    expect(out).toContain('alice');
+    expect(out).toContain('donor1');
+    expect(out).toContain('stub:a');
+    expect(out).toContain('stub:b');
+    // Every record line is present.
+    expect(out).toContain('#0');
+    expect(out).toContain('#1');
   });
 });

@@ -62,6 +62,23 @@ describe('createDonationConfig', () => {
     expect(createDonationConfig({ idle: '22:00-07:00', cap: '500k', pool: 'open' }).cap).toBe(500_000);
   });
 
+  it('defaults to FREE (priceUsdc 0, base chain) when no --price is given', () => {
+    const c = createDonationConfig({ idle: '22:00-07:00', cap: 1000, pool: 'open' });
+    expect(c.priceUsdc).toBe(0);
+    expect(c.chain).toBe('base');
+  });
+
+  it('arms the payment gate for a priced config (number or decimal string)', () => {
+    expect(createDonationConfig({ idle: '22:00-07:00', cap: 1000, pool: 'open', price: 0.001 }).priceUsdc).toBe(0.001);
+    expect(createDonationConfig({ idle: '22:00-07:00', cap: 1000, pool: 'open', price: '1.5' }).priceUsdc).toBe(1.5);
+    expect(createDonationConfig({ idle: '22:00-07:00', cap: 1000, pool: 'open', price: 0, chain: 'polygon' }).priceUsdc).toBe(0);
+  });
+
+  it('rejects a non-positive / malformed price', () => {
+    expect(() => createDonationConfig({ idle: '22:00-07:00', cap: 1000, pool: 'open', price: -1 })).toThrow(/positive/);
+    expect(() => createDonationConfig({ idle: '22:00-07:00', cap: 1000, pool: 'open', price: 'free' })).toThrow(/invalid price/);
+  });
+
   it('rejects non-compute tiers (v0 is compute-only)', () => {
     expect(() =>
       createDonationConfig({ idle: '22:00-07:00', cap: 1000, pool: 'open', tier: 'credits' as never }),

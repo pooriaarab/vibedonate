@@ -22,6 +22,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { parsePriceUsdc } from './payment.js';
+
 // vibe-core is the suite spine: the model-preference cascade, the cross-harness
 // hooks bus, and the consent ledger. vibedonate re-exports the pieces it leans on
 // so consumers of this package never reach for @pooriaarab/vibe-core directly for
@@ -96,6 +98,30 @@ export type {
   VibeEvent,
 };
 
+// Re-export the x402/USDC payment surface so consumers of this package reach it
+// via `@pooriaarab/vibedonate` instead of the internal `./payment.js` path.
+// FREE (price 0) is the default and never constructs PaymentTerms.
+export {
+  createPaymentLedger,
+  filePaymentStore,
+  parsePriceUsdc,
+  paymentsPath,
+  stubWallet,
+} from './payment.js';
+export type {
+  Chain,
+  ChargeResult,
+  PaymentDirection,
+  PaymentLedger,
+  PaymentProof,
+  PaymentRecord,
+  PaymentRecordInput,
+  PaymentStore,
+  PaymentTerms,
+  PaymentTotals,
+  Wallet,
+} from './payment.js';
+
 /** The consent scope that arms local-compute donation. {@link createDonationConfig} */
 export const DONATE_COMPUTE_SCOPE = 'donate:compute' as const;
 
@@ -128,6 +154,15 @@ export interface DonationConfig {
   readonly pool: RecipientPool;
   /** Master opt-in toggle. Mirrors the `donate:compute` consent grant. */
   readonly enabled: boolean;
+  /**
+   * Per-job USDC price (x402 charge-per-inference). `0` = FREE (the default):
+   * the donor takes the unchanged free path and never builds PaymentTerms.
+   * `> 0` arms the payment gate — the donor advertises PaymentTerms in its
+   * hello and refuses jobs without a verifiable PaymentProof.
+   */
+  readonly priceUsdc: number;
+  /** Settlement chain for priced jobs (ignored when `priceUsdc === 0`). */
+  readonly chain: import('./payment.js').Chain;
   readonly createdAt: string;
 }
 
@@ -141,6 +176,14 @@ export interface CreateDonationConfigOpts {
   /** `"open"` · `"org:id[,member...]"` · `"allowlist:peer,peer"`. */
   readonly pool: string;
   readonly enabled?: boolean;
+  /**
+   * Per-job USDC price (x402). Omitted/`0` = FREE (the default). Accepts a
+   * number or a decimal string (e.g. `0.001`, `'1.5'`). `> 0` arms the
+   * payment gate. See {@link parsePriceUsdc}.
+   */
+  readonly price?: number | string;
+  /** Settlement chain for priced jobs. Defaults to `'base'`. */
+  readonly chain?: import('./payment.js').Chain;
 }
 
 /** A tamper-evident usage receipt recorded in the metering ledger. */
@@ -316,12 +359,18 @@ export function createDonationConfig(opts: CreateDonationConfigOpts): DonationCo
   const idle = parseIdleWindow(opts.idle);
   const cap = parseCap(opts.cap);
   const pool = parsePool(opts.pool);
+  // x402 price: FREE by default. Only priced (>0) configs arm the payment gate;
+  // price 0 takes the unchanged free path everywhere downstream.
+  const priceUsdc = opts.price === undefined ? 0 : opts.price === 0 ? 0 : parsePriceUsdc(opts.price);
+  const chain = opts.chain ?? 'base';
   return {
     tier: 'compute',
     idle,
     cap,
     pool,
     enabled: opts.enabled ?? true,
+    priceUsdc,
+    chain,
     createdAt: new Date().toISOString(),
   };
 }
