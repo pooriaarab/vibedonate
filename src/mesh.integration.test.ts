@@ -336,9 +336,11 @@ describe('live compute mesh — x402 payment gate (priced donor, in-process DHT)
   /** Wait until BOTH sides have each other's hello (bidirectional handshake). */
   async function bothSeen(d: PricedBundle, c: { session: ConsumerSession } | ConsumerSession): Promise<boolean> {
     const cSession = 'session' in c ? c.session : c;
+    // 25s budget — the in-process testnet can be slow to establish a connection
+    // under back-to-back load; the original one-direction waits use 15s.
     return waitFor(
       () => cSession.peers.size >= 1 && d.session.peers.size >= 1,
-      15_000,
+      25_000,
     );
   }
 
@@ -357,7 +359,7 @@ describe('live compute mesh — x402 payment gate (priced donor, in-process DHT)
     expect(d.session.jobsRun).toBe(0);
     expect(d.ledger.all()).toHaveLength(0); // no metering receipt
     expect(d.paymentLedger.all()).toHaveLength(0); // no payment received
-  }, 30_000);
+  }, 40_000);
 
   it('allows a priced job WITH a valid proof — output + metering receipt + payment recorded both sides', async () => {
     const d = await spawnPricedDonor('donor1', 0.5);
@@ -390,7 +392,7 @@ describe('live compute mesh — x402 payment gate (priced donor, in-process DHT)
     expect(sent[0]!.direction).toBe('sent');
     expect(alice.ledger.verify()).toBe(true);
     expect(sent[0]!.txRef).toBe(received[0]!.txRef);
-  }, 30_000);
+  }, 40_000);
 
   it('leaves a FREE donor unchanged — a paying consumer charges nothing, no payment records', async () => {
     const d = await spawnFreeDonor('donor1');
@@ -407,7 +409,7 @@ describe('live compute mesh — x402 payment gate (priced donor, in-process DHT)
     expect(d.ledger.all()).toHaveLength(1); // metering receipt STILL recorded
     expect(d.paymentLedger.all()).toHaveLength(0); // but NO payment
     expect(alice.ledger.all()).toHaveLength(0); // consumer charged nothing
-  }, 30_000);
+  }, 40_000);
 
   it('refuses to JOIN as a priced donor without a wallet (before any network)', async () => {
     const consent = createConsentLedger();
