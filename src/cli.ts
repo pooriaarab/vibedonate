@@ -32,6 +32,7 @@ import {
   publishDonationEvent,
   resolveCompute,
   saveConfigToFile,
+  type Chain,
   type ComputeResolution,
   type DonationConfig,
   type RecipientPool,
@@ -141,6 +142,8 @@ function parseShare(opts: readonly string[]): {
   let pool: string | undefined;
   let handle: string | undefined;
   let compute = false;
+  let price: string | undefined;
+  let chain: string | undefined;
 
   const takeValue = (flag: string, raw: string, advance: () => string | undefined): string => {
     const eq = raw.indexOf('=');
@@ -174,6 +177,15 @@ function parseShare(opts: readonly string[]): {
       handle = takeValue('--handle', a, advance);
       continue;
     }
+    if (a === '--price' || a.startsWith('--price=')) {
+      // x402 per-job USDC price (e.g. --price 0.001). Default 0 = FREE.
+      price = takeValue('--price', a, advance);
+      continue;
+    }
+    if (a === '--chain' || a.startsWith('--chain=')) {
+      chain = takeValue('--chain', a, advance);
+      continue;
+    }
     throw new Error(`unexpected option: ${JSON.stringify(a)}`);
   }
 
@@ -182,12 +194,28 @@ function parseShare(opts: readonly string[]): {
   if (cap === undefined) throw new Error('--cap is required (e.g. --cap 2000000 or --cap 2M)');
   if (pool === undefined) throw new Error('--pool is required (open|org:id|allowlist:peers)');
 
+  const resolvedChain = chain === undefined ? undefined : parseChain(chain);
   return {
-    config: createDonationConfig({ idle, cap, pool }),
+    config: createDonationConfig({
+      idle,
+      cap,
+      pool,
+      ...(price === undefined ? {} : { price }),
+      ...(resolvedChain === undefined ? {} : { chain: resolvedChain }),
+    }),
     // Cap at the mesh handshake MAX_HANDLE_LEN so an over-long hostname can't
     // make our own hello fail validation on the wire.
     handle: (handle ?? hostname()).slice(0, 64),
   };
+}
+
+/** Validate a --chain value into the x402 Chain union. Throws on unknown chain. */
+function parseChain(raw: string): Chain {
+  const v = raw.trim().toLowerCase();
+  if (v !== 'base' && v !== 'ethereum' && v !== 'polygon') {
+    throw new Error(`--chain must be base|ethereum|polygon (got ${JSON.stringify(raw)})`);
+  }
+  return v;
 }
 
 /** Parse `request` options into a consumer command. Pure: no IO. Throws on error. */
