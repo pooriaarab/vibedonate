@@ -38,7 +38,7 @@ import {
 } from './index.js';
 
 /** Matches package.json — single source for the `--version` string. */
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 export type ParsedCommand =
   | { readonly kind: 'help' }

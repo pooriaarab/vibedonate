@@ -1,6 +1,6 @@
 {
   "name": "vibedonate",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "BitTorrent-style mesh for AI inference — donate spare local compute across agentic CLIs. Opt-in, metered, your hardware. Local-first. v0: local-compute node + metering + allow-list.",
   "type": "module",
   "license": "MIT",
