@@ -94,6 +94,39 @@ describe('parseArgs', () => {
     expect(typeof without.handle).toBe('string');
     expect(without.handle.length).toBeGreaterThan(0);
   });
+
+  it('share arms the payment gate with --price (decimal) + --chain', () => {
+    const priced = parseArgs([
+      'share', '--compute', '--idle', '22:00-07:00', '--cap', '1000', '--pool', 'open',
+      '--price', '0.001', '--chain', 'base',
+    ]);
+    expect(priced.kind).toBe('share');
+    if (priced.kind !== 'share') return;
+    expect(priced.config.priceUsdc).toBe(0.001);
+    expect(priced.config.chain).toBe('base');
+
+    const poly = parseArgs([
+      'share', '--compute', '--idle=09:00-17:00', '--cap=1000', '--pool=open', '--price=1.5', '--chain=polygon',
+    ]);
+    expect(poly.kind).toBe('share');
+    if (poly.kind !== 'share') return;
+    expect(poly.config.priceUsdc).toBe(1.5);
+    expect(poly.config.chain).toBe('polygon');
+  });
+
+  it('share stays FREE by default (priceUsdc 0) and rejects a bad chain/price', () => {
+    const free = parseArgs(['share', '--compute', '--idle', '22:00-07:00', '--cap', '1000', '--pool', 'open']);
+    expect(free.kind).toBe('share');
+    if (free.kind !== 'share') return;
+    expect(free.config.priceUsdc).toBe(0);
+
+    expect(() =>
+      parseArgs(['share', '--compute', '--idle', '22:00-07:00', '--cap', '1000', '--pool', 'open', '--chain', 'solana']),
+    ).toThrow(/chain/);
+    expect(() =>
+      parseArgs(['share', '--compute', '--idle', '22:00-07:00', '--cap', '1000', '--pool', 'open', '--price', '0']),
+    ).toThrow(/positive/);
+  });
 });
 
 describe('parseArgs (request)', () => {
