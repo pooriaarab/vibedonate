@@ -13,8 +13,15 @@ import {
   poolTopicKey,
   randomTopic,
   serializeFrame,
+  startDonor,
 } from './mesh.js';
-import { parsePool } from './index.js';
+import {
+  createConsentLedger,
+  createDonationConfig,
+  createMeteringLedger,
+  DONATE_COMPUTE_SCOPE,
+  parsePool,
+} from './index.js';
 
 describe('poolTopicKey / poolTopic (deterministic discovery label)', () => {
   it('maps each pool kind to a stable key', () => {
@@ -120,5 +127,79 @@ describe('createEchoModel (v0 deterministic stub)', () => {
 
   it('stamps a stable model id for receipts', () => {
     expect(createEchoModel().id).toBe('echo-stub');
+  });
+});
+
+describe('x402 payment frames (priced hello + paid job, allow-listed)', () => {
+  it('round-trips a PRICED hello (priceUsdc + payTo + chain) and a PAID job', () => {
+    const hello = {
+      t: 'hello',
+      handle: '@donor',
+      pool: 'open',
+      capacityTier: 'compute',
+      priceUsdc: 0.5,
+      payTo: '0xabc',
+      chain: 'base',
+    } as const;
+    expect(parseFrame(serializeFrame(hello))).toEqual(hello);
+    const job = {
+      t: 'job',
+      id: 'j1',
+      prompt: 'hi',
+      payment: { payer: 'alice', amountUsdc: 0.5, txRef: 'stub:deadbeef' },
+    } as const;
+    expect(parseFrame(serializeFrame(job))).toEqual(job);
+  });
+
+  it('keeps a FREE hello/job at exactly their base keys (no payment leak)', () => {
+    const freeHello = parseFrame(
+      serializeFrame({ t: 'hello', handle: '@x', pool: 'open', capacityTier: 'compute' }),
+    );
+    expect(freeHello).not.toBeNull();
+    expect(Object.keys(freeHello!).sort()).toEqual(['capacityTier', 'handle', 'pool', 't']);
+    const freeJob = parseFrame(serializeFrame({ t: 'job', id: 'j', prompt: 'hi' }));
+    expect(freeJob).not.toBeNull();
+    expect(Object.keys(freeJob!).sort()).toEqual(['id', 'prompt', 't']);
+  });
+
+  it('refuses to advertise a non-positive price (privacy: free stays free) and strips extra payment fields', () => {
+    // priceUsdc 0 must NOT be advertised — the hello collapses to a free hello.
+    const fakeFree = parseFrame(
+      JSON.stringify({ t: 'hello', handle: '@x', pool: 'open', capacityTier: 'compute', priceUsdc: 0, payTo: '0xabc' }),
+    );
+    expect(fakeFree).toEqual({ t: 'hello', handle: '@x', pool: 'open', capacityTier: 'compute' });
+    // A hostile payment field carrying extra keys is stripped to the allow-list.
+    const hostile = parseFrame(
+      JSON.stringify({
+        t: 'job',
+        id: 'j',
+        prompt: 'hi',
+        payment: { payer: 'alice', amountUsdc: 0.5, txRef: 'stub:x', rawUsage: 'leak', sig: 's' },
+      }),
+    );
+    expect(hostile).toEqual({
+      t: 'job',
+      id: 'j',
+      prompt: 'hi',
+      payment: { payer: 'alice', amountUsdc: 0.5, txRef: 'stub:x', sig: 's' },
+    });
+  });
+
+  it('drops a malformed payment (keeps the job free) rather than rejecting the frame', () => {
+    const kept = parseFrame(
+      JSON.stringify({ t: 'job', id: 'j', prompt: 'hi', payment: { payer: '', amountUsdc: 0.5, txRef: 'stub:x' } }),
+    );
+    expect(kept).toEqual({ t: 'job', id: 'j', prompt: 'hi' });
+  });
+});
+
+describe('startDonor x402 wiring (no sockets — refuses priced-without-wallet pre-network)', () => {
+  it('refuses to JOIN as a PRICED donor without a wallet (before any network)', async () => {
+    const consent = createConsentLedger();
+    consent.grant(DONATE_COMPUTE_SCOPE);
+    const priced = createDonationConfig({ idle: '00:00-00:00', cap: 1000, pool: 'allowlist:alice', price: 0.5 });
+    await expect(
+      startDonor({ handle: 'donor', config: priced, consent, ledger: createMeteringLedger() }),
+    ).rejects.toThrow(/wallet/);
   });
 });
