@@ -76,4 +76,66 @@ describe('parseArgs', () => {
       parseArgs(['share', '--compute', '--idle', 'nope', '--cap', '1000', '--pool', 'open']),
     ).toThrow();
   });
+
+  it('share accepts an optional --handle (defaults to hostname when omitted)', () => {
+    const withHandle = parseArgs([
+      'share', '--compute', '--idle', '22:00-07:00', '--cap', '1000', '--pool', 'open',
+      '--handle', 'my-donor',
+    ]);
+    expect(withHandle.kind).toBe('share');
+    if (withHandle.kind !== 'share') return;
+    expect(withHandle.handle).toBe('my-donor');
+
+    const without = parseArgs([
+      'share', '--compute', '--idle', '22:00-07:00', '--cap', '1000', '--pool', 'open',
+    ]);
+    expect(without.kind).toBe('share');
+    if (without.kind !== 'share') return;
+    expect(typeof without.handle).toBe('string');
+    expect(without.handle.length).toBeGreaterThan(0);
+  });
+});
+
+describe('parseArgs (request)', () => {
+  it('parses the canonical request command (prompt + pool, default handle)', () => {
+    const cmd = parseArgs(['request', 'reverse me', '--pool', 'allowlist:alice,bob']);
+    expect(cmd).toEqual({
+      kind: 'request',
+      prompt: 'reverse me',
+      pool: { kind: 'allowlist', peers: ['alice', 'bob'] },
+      handle: 'consumer',
+    });
+  });
+
+  it('accepts --handle and --timeout, and =-joined flags', () => {
+    const cmd = parseArgs([
+      'request', 'hello', '--pool=open', '--handle=alice', '--timeout=8000',
+    ]);
+    expect(cmd.kind).toBe('request');
+    if (cmd.kind !== 'request') return;
+    expect(cmd.pool).toEqual({ kind: 'open' });
+    expect(cmd.handle).toBe('alice');
+    expect(cmd.timeoutMs).toBe(8000);
+  });
+
+  it('requires a prompt and --pool', () => {
+    expect(() => parseArgs(['request', '--pool', 'open'])).toThrow(/prompt/);
+    expect(() => parseArgs(['request', 'hi'])).toThrow(/--pool/);
+  });
+
+  it('rejects a non-positive --timeout and unknown options', () => {
+    expect(() =>
+      parseArgs(['request', 'hi', '--pool', 'open', '--timeout', '0']),
+    ).toThrow(/timeout/);
+    expect(() =>
+      parseArgs(['request', 'hi', '--pool', 'open', '--bogus']),
+    ).toThrow(/unexpected option/);
+    expect(() =>
+      parseArgs(['request', 'hi', 'extra', '--pool', 'open']),
+    ).toThrow(/unexpected argument/);
+  });
+
+  it('surfaces pool validation errors from parsePool', () => {
+    expect(() => parseArgs(['request', 'hi', '--pool', 'nonsense:foo'])).toThrow();
+  });
 });
