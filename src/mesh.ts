@@ -671,6 +671,18 @@ export interface ConsumerOptions {
   readonly pool: RecipientPool;
   /** Tier we say we want. Purely informational metadata in v0. */
   readonly capacityTier?: string;
+  /**
+   * x402 wallet used to PAY priced donors. When a targeted donor advertises a
+   * price, the consumer charges `wallet.charge(handle, price)` and attaches the
+   * resulting PaymentProof to the job. Omit to refuse payment (a priced donor
+   * will then deny the job 'payment required').
+   */
+  readonly wallet?: Wallet;
+  /**
+   * Hash-chained ledger of payments SENT; records one entry per priced job that
+   * actually succeeded. Optional (in-memory only if omitted).
+   */
+  readonly paymentLedger?: PaymentLedger;
   /** Override the joined topic (tests pass a random one on an isolated DHT). */
   readonly topic?: Buffer;
   /** DHT bootstrap nodes; omit for the public DHT. Tests pass a local testnet. */
@@ -709,7 +721,7 @@ export interface ConsumerSession {
    * accepted job); returns the first non-denied result, else the denial.
    * Resolves to `null` only if no donor handshakes within the timeout.
    */
-  request(prompt: string, opts?: { readonly timeoutMs?: number }): Promise<JobResult | null>;
+  request(prompt: string, opts?: { readonly timeoutMs?: number; readonly payUsdc?: number }): Promise<JobResult | null>;
   close(): Promise<void>;
 }
 
@@ -719,7 +731,7 @@ export interface ConsumerSession {
  * donating; the DONOR gates every job.
  */
 export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSession> {
-  const { handle, pool, capacityTier = 'compute' } = opts;
+  const { handle, pool, capacityTier = 'compute', wallet, paymentLedger } = opts;
   const topic = opts.topic ?? poolTopic(pool);
   const hello: PeerHello = { t: 'hello', handle, pool: poolTopicKey(pool), capacityTier };
 
@@ -754,7 +766,17 @@ export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSess
       const frame = parseFrame(line);
       if (frame === null) return;
       if (frame.t === 'hello') {
-        const peer: PeerHello = { t: 'hello', handle: frame.handle, pool: frame.pool, capacityTier: frame.capacityTier };
+        // Preserve an advertised price (priceUsdc/payTo/chain) so request() knows
+        // what to pay — a FREE donor's hello carries none of these.
+        const peer: PeerHello = {
+          t: 'hello',
+          handle: frame.handle,
+          pool: frame.pool,
+          capacityTier: frame.capacityTier,
+          ...(frame.priceUsdc !== undefined ? { priceUsdc: frame.priceUsdc } : {}),
+          ...(frame.payTo !== undefined ? { payTo: frame.payTo } : {}),
+          ...(frame.chain !== undefined ? { chain: frame.chain } : {}),
+        };
         if (peer.pool !== hello.pool) return; // different pool on this topic → drop
         peers.set(remoteKey, peer);
         donors.set(remoteKey, { hello: peer, socket });
@@ -781,9 +803,32 @@ export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSess
   }, REFRESH_INTERVAL_MS);
   refresher.unref();
 
-  /** Send a job to one donor and await its result (per-donor timeout). */
-  const askDonor = (donor: ReadyDonor, prompt: string, timeoutMs: number): Promise<JobResult> => {
+  /**
+   * Send a job to one donor and await its result (per-donor timeout). When the
+   * donor is priced, charges the wallet and attaches a PaymentProof first; on a
+   * SUCCESSFUL result records a 'sent' payment to the payment ledger.
+   */
+  const askDonor = async (
+    donor: ReadyDonor,
+    prompt: string,
+    timeoutMs: number,
+    payUsdc?: number,
+  ): Promise<JobResult> => {
     const id = randomJobId();
+    // x402: if this donor advertises a price, charge via the wallet and attach
+    // a proof. No wallet / failed charge → no proof → a priced donor denies
+    // 'payment required'; a FREE donor ignores payment entirely.
+    let payment: PaymentProof | undefined;
+    const priceUsdc = donor.hello.priceUsdc;
+    if (typeof priceUsdc === 'number' && priceUsdc > 0) {
+      const amount = payUsdc ?? priceUsdc;
+      if (wallet !== undefined) {
+        const r = await wallet.charge(handle, amount);
+        if (r.paid && typeof r.txRef === 'string' && r.txRef.length > 0) {
+          payment = { payer: handle, amountUsdc: amount, txRef: r.txRef };
+        }
+      }
+    }
     return new Promise<JobResult>((resolve) => {
       const timer = setTimeout(() => {
         if (pending.delete(id)) resolve({ output: '', donor: donor.hello.handle, denied: true, reason: 'timeout' });
@@ -792,6 +837,15 @@ export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSess
         socket: donor.socket,
         resolve: (result) => {
           clearTimeout(timer);
+          // x402: record a 'sent' payment ONLY when the job actually succeeded.
+          if (payment !== undefined && result.denied !== true && paymentLedger !== undefined) {
+            paymentLedger.record({
+              peer: donor.hello.handle,
+              amountUsdc: payment.amountUsdc,
+              direction: 'sent',
+              txRef: payment.txRef,
+            });
+          }
           resolve({
             output: result.output,
             donor: donor.hello.handle,
@@ -804,7 +858,9 @@ export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSess
           resolve({ output: '', donor: donor.hello.handle, denied: true, reason: 'disconnected' });
         },
       });
-      donor.socket.write(`${serializeFrame({ t: 'job', id, prompt })}\n`);
+      donor.socket.write(
+        `${serializeFrame({ t: 'job', id, prompt, ...(payment !== undefined ? { payment } : {}) })}\n`,
+      );
     });
   };
 
@@ -827,16 +883,17 @@ export async function startConsumer(opts: ConsumerOptions): Promise<ConsumerSess
     async request(prompt, ropts = {}): Promise<JobResult | null> {
       const overallMs = ropts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
       const perDonorMs = Math.min(overallMs, PER_DONOR_TIMEOUT_MS);
+      const payUsdc = ropts.payUsdc;
       // Give the swarm a beat to discover + handshake at least one donor.
       await waitForDonors(1, overallMs);
       if (donors.size === 0) return null;
 
       // Snapshot then try donors in order. Stop at the first non-denied answer;
-      // a denial means that donor is not authorized/green, so try the next.
+      // a denial means that donor is not authorized/green/paid, so try the next.
       const snapshot = [...donors.values()];
       let last: JobResult | null = null;
       for (const donor of snapshot) {
-        const result = await askDonor(donor, prompt, perDonorMs);
+        const result = await askDonor(donor, prompt, perDonorMs, payUsdc);
         last = result;
         if (result.denied !== true) return result; // landed on a green donor
       }

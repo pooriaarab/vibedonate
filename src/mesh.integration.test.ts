@@ -20,10 +20,13 @@ import {
   createConsentLedger,
   createDonationConfig,
   createMeteringLedger,
+  createPaymentLedger,
   DONATE_COMPUTE_SCOPE,
+  stubWallet,
   type ConsentLedger,
   type DonationConfig,
   type MeteringLedger,
+  type PaymentLedger,
 } from './index.js';
 import {
   DEFAULT_JOB_TOKEN_COST,
@@ -52,12 +55,13 @@ async function waitFor(cond: () => boolean, timeoutMs: number): Promise<boolean>
   return cond();
 }
 
-function makeConfig(opts: { pool?: string; cap?: number; enabled?: boolean } = {}): DonationConfig {
+function makeConfig(opts: { pool?: string; cap?: number; enabled?: boolean; price?: number } = {}): DonationConfig {
   return createDonationConfig({
     idle: ALWAYS,
     cap: opts.cap ?? 1_000_000,
     pool: opts.pool ?? 'allowlist:alice,bob',
     enabled: opts.enabled ?? true,
+    ...(opts.price === undefined ? {} : { price: opts.price }),
   });
 }
 
@@ -229,5 +233,193 @@ describe('live compute mesh (in-process DHT, no public network)', () => {
         bootstrap: testnet.bootstrap,
       }),
     ).rejects.toThrow(/consent/);
+  }, 10_000);
+});
+
+describe('live compute mesh — x402 payment gate (priced donor, in-process DHT)', () => {
+  interface PricedBundle {
+    readonly session: DonorSession;
+    readonly ledger: MeteringLedger;
+    readonly paymentLedger: PaymentLedger;
+    readonly consent: ConsentLedger;
+  }
+  let testnet: Awaited<ReturnType<typeof createTestnet>>;
+  let pricedDonors: PricedBundle[];
+  let consumers: ConsumerSession[];
+  let consumerLedgers: PaymentLedger[];
+
+  beforeEach(async () => {
+    testnet = await createTestnet(3);
+    pricedDonors = [];
+    consumers = [];
+    consumerLedgers = [];
+  }, 30_000);
+
+  afterEach(async () => {
+    for (const c of consumers) await c.close();
+    for (const d of pricedDonors) await d.session.close();
+    await testnet.destroy();
+  }, 30_000);
+
+  /** Spawn a PRICED donor (price > 0): arms a stubWallet + paymentLedger. */
+  async function spawnPricedDonor(
+    handle: string,
+    price: number,
+    pool = 'allowlist:alice,bob',
+  ): Promise<PricedBundle> {
+    const consent = createConsentLedger();
+    consent.grant(DONATE_COMPUTE_SCOPE);
+    const ledger = createMeteringLedger();
+    const paymentLedger = createPaymentLedger();
+    const session = await startDonor({
+      handle,
+      config: makeConfig({ pool, price }),
+      consent,
+      ledger,
+      wallet: stubWallet(handle),
+      paymentLedger,
+      bootstrap: testnet.bootstrap,
+    });
+    const bundle: PricedBundle = { session, ledger, paymentLedger, consent };
+    pricedDonors.push(bundle);
+    return bundle;
+  }
+
+  /** Spawn a FREE donor (price 0) that still carries a paymentLedger (must stay empty). */
+  async function spawnFreeDonor(handle: string, pool = 'allowlist:alice,bob'): Promise<PricedBundle> {
+    const consent = createConsentLedger();
+    consent.grant(DONATE_COMPUTE_SCOPE);
+    const ledger = createMeteringLedger();
+    const paymentLedger = createPaymentLedger();
+    const session = await startDonor({
+      handle,
+      config: makeConfig({ pool }), // price omitted → FREE
+      consent,
+      ledger,
+      paymentLedger,
+      bootstrap: testnet.bootstrap,
+    });
+    const bundle: PricedBundle = { session, ledger, paymentLedger, consent };
+    pricedDonors.push(bundle);
+    return bundle;
+  }
+
+  /** Spawn a consumer that CAN pay (arms a stubWallet + paymentLedger). */
+  async function spawnPayingConsumer(
+    handle: string,
+    pool = 'alice,bob',
+  ): Promise<{ session: ConsumerSession; ledger: PaymentLedger }> {
+    const ledger = createPaymentLedger();
+    const session = await startConsumer({
+      handle,
+      pool: { kind: 'allowlist', peers: pool.split(',').map((s) => s.trim()) },
+      wallet: stubWallet(handle),
+      paymentLedger: ledger,
+      bootstrap: testnet.bootstrap,
+    });
+    consumers.push(session);
+    consumerLedgers.push(ledger);
+    return { session, ledger };
+  }
+
+  /** Spawn a consumer with NO wallet (cannot pay a priced donor). */
+  async function spawnBrokeConsumer(handle: string, pool = 'alice,bob'): Promise<ConsumerSession> {
+    const session = await startConsumer({
+      handle,
+      pool: { kind: 'allowlist', peers: pool.split(',').map((s) => s.trim()) },
+      bootstrap: testnet.bootstrap,
+    });
+    consumers.push(session);
+    return session;
+  }
+
+  /** Wait until BOTH sides have each other's hello (bidirectional handshake). */
+  async function bothSeen(d: PricedBundle, c: { session: ConsumerSession } | ConsumerSession): Promise<boolean> {
+    const cSession = 'session' in c ? c.session : c;
+    return waitFor(
+      () => cSession.peers.size >= 1 && d.session.peers.size >= 1,
+      15_000,
+    );
+  }
+
+  it('denies a priced job WITHOUT payment — no job runs, no receipt, no payment', async () => {
+    const d = await spawnPricedDonor('donor1', 0.5);
+    const alice = await spawnBrokeConsumer('alice'); // no wallet → can't pay
+    await Promise.all([d.session.ready, alice.ready]);
+    expect(await bothSeen(d, alice)).toBe(true);
+
+    const result = await alice.request('let me in', { timeoutMs: 15_000 });
+    expect(result).not.toBeNull();
+    expect(result!.denied).toBe(true);
+    expect(result!.reason).toMatch(/payment required/);
+
+    await waitFor(() => d.session.jobsDenied >= 1, 5_000);
+    expect(d.session.jobsRun).toBe(0);
+    expect(d.ledger.all()).toHaveLength(0); // no metering receipt
+    expect(d.paymentLedger.all()).toHaveLength(0); // no payment received
+  }, 30_000);
+
+  it('allows a priced job WITH a valid proof — output + metering receipt + payment recorded both sides', async () => {
+    const d = await spawnPricedDonor('donor1', 0.5);
+    const alice = await spawnPayingConsumer('alice');
+    await Promise.all([d.session.ready, alice.session.ready]);
+    expect(await bothSeen(d, alice)).toBe(true);
+
+    const result = await alice.session.request('charge me', { timeoutMs: 15_000 });
+    expect(result).not.toBeNull();
+    expect(result!.denied).toBeUndefined();
+    expect(result!.output).toBe('em egrahc'); // echo stub reverses the prompt
+
+    await waitFor(() => d.session.jobsRun >= 1, 5_000);
+
+    // Donor: BOTH a metering receipt AND a hash-chained payment record.
+    expect(d.ledger.all()).toHaveLength(1);
+    expect(d.ledger.all()[0]!.tokens).toBe(DEFAULT_JOB_TOKEN_COST);
+    const received = d.paymentLedger.all();
+    expect(received).toHaveLength(1);
+    expect(received[0]!.peer).toBe('alice');
+    expect(received[0]!.amountUsdc).toBe(0.5);
+    expect(received[0]!.direction).toBe('received');
+    expect(d.paymentLedger.verify()).toBe(true);
+
+    // Consumer: a matching 'sent' payment record (same settlement txRef).
+    const sent = alice.ledger.all();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.peer).toBe('donor1');
+    expect(sent[0]!.amountUsdc).toBe(0.5);
+    expect(sent[0]!.direction).toBe('sent');
+    expect(alice.ledger.verify()).toBe(true);
+    expect(sent[0]!.txRef).toBe(received[0]!.txRef);
+  }, 30_000);
+
+  it('leaves a FREE donor unchanged — a paying consumer charges nothing, no payment records', async () => {
+    const d = await spawnFreeDonor('donor1');
+    const alice = await spawnPayingConsumer('alice');
+    await Promise.all([d.session.ready, alice.session.ready]);
+    expect(await bothSeen(d, alice)).toBe(true);
+
+    const result = await alice.session.request('free please', { timeoutMs: 15_000 });
+    expect(result).not.toBeNull();
+    expect(result!.denied).toBeUndefined();
+    expect(result!.output).toBe('esaelp eerf');
+
+    await waitFor(() => d.session.jobsRun >= 1, 5_000);
+    expect(d.ledger.all()).toHaveLength(1); // metering receipt STILL recorded
+    expect(d.paymentLedger.all()).toHaveLength(0); // but NO payment
+    expect(alice.ledger.all()).toHaveLength(0); // consumer charged nothing
+  }, 30_000);
+
+  it('refuses to JOIN as a priced donor without a wallet (before any network)', async () => {
+    const consent = createConsentLedger();
+    consent.grant(DONATE_COMPUTE_SCOPE);
+    await expect(
+      startDonor({
+        handle: 'rogue',
+        config: makeConfig({ price: 0.25 }),
+        consent,
+        ledger: createMeteringLedger(),
+        bootstrap: testnet.bootstrap,
+      }),
+    ).rejects.toThrow(/wallet/);
   }, 10_000);
 });

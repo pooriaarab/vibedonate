@@ -151,6 +151,27 @@ describe('parseArgs (request)', () => {
     expect(cmd.timeoutMs).toBe(8000);
   });
 
+  it('accepts --pay <usdc> (x402) and surfaces a bad price', () => {
+    const cmd = parseArgs(['request', 'hello', '--pool', 'open', '--pay', '0.001']);
+    expect(cmd.kind).toBe('request');
+    if (cmd.kind !== 'request') return;
+    expect(cmd.payUsdc).toBe(0.001);
+
+    const joined = parseArgs(['request', 'hello', '--pool=open', '--pay=1.5']);
+    expect(joined.kind).toBe('request');
+    if (joined.kind !== 'request') return;
+    expect(joined.payUsdc).toBe(1.5);
+
+    // --pay defaults to omitted (auto-read the donor's advertised price).
+    const none = parseArgs(['request', 'hello', '--pool', 'open']);
+    expect(none.kind).toBe('request');
+    if (none.kind !== 'request') return;
+    expect(none.payUsdc).toBeUndefined();
+
+    expect(() => parseArgs(['request', 'hello', '--pool', 'open', '--pay', '0'])).toThrow(/positive/);
+    expect(() => parseArgs(['request', 'hello', '--pool', 'open', '--pay', 'free'])).toThrow(/invalid price/);
+  });
+
   it('requires a prompt and --pool', () => {
     expect(() => parseArgs(['request', '--pool', 'open'])).toThrow(/prompt/);
     expect(() => parseArgs(['request', 'hi'])).toThrow(/--pool/);
