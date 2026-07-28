@@ -22,19 +22,24 @@ import { createConsentLedger } from '@pooriaarab/vibe-core';
 import {
   createDonationConfig,
   createMeteringLedger,
+  createPaymentLedger,
   defaultDataDir,
   DONATE_COMPUTE_SCOPE,
   fileConsentStore,
   fileMeteringStore,
+  filePaymentStore,
   isSharingActive,
   loadConfigFromFile,
   parsePool,
+  parsePriceUsdc,
   publishDonationEvent,
   resolveCompute,
   saveConfigToFile,
+  stubWallet,
   type Chain,
   type ComputeResolution,
   type DonationConfig,
+  type PaymentTotals,
   type RecipientPool,
 } from './index.js';
 
@@ -54,6 +59,8 @@ export type ParsedCommand =
       readonly pool: RecipientPool;
       readonly handle: string;
       readonly timeoutMs?: number;
+      /** Per-job USDC the consumer is willing to pay; omitted = auto-read donor price. */
+      readonly payUsdc?: number;
     };
 
 const HELP = `vibedonate ${VERSION} — donate spare local compute across agentic CLIs.
@@ -224,6 +231,7 @@ function parseRequest(opts: readonly string[]): Extract<ParsedCommand, { kind: '
   let pool: string | undefined;
   let handle = 'consumer';
   let timeoutMs: number | undefined;
+  let pay: string | undefined;
 
   const takeValue = (flag: string, raw: string, advance: () => string | undefined): string => {
     const eq = raw.indexOf('=');
@@ -254,6 +262,12 @@ function parseRequest(opts: readonly string[]): Extract<ParsedCommand, { kind: '
       timeoutMs = Math.floor(n);
       continue;
     }
+    if (a === '--pay' || a.startsWith('--pay=')) {
+      // x402: per-job USDC to offer a priced donor. Omitted = auto-read the
+      // donor's advertised price. A FREE donor ignores payment entirely.
+      pay = takeValue('--pay', a, advance);
+      continue;
+    }
     if (a.startsWith('--')) throw new Error(`unexpected option: ${JSON.stringify(a)}`);
     // First non-flag token is the prompt (shell-passed, may be quoted).
     if (prompt === undefined) {
@@ -269,12 +283,14 @@ function parseRequest(opts: readonly string[]): Extract<ParsedCommand, { kind: '
   if (pool === undefined) {
     throw new Error("--pool is required (must match a donor's pool definition)");
   }
+  const payUsdc = pay === undefined ? undefined : parsePriceUsdc(pay);
   return {
     kind: 'request',
     prompt,
     pool: parsePool(pool),
     handle: handle.slice(0, 64),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(payUsdc === undefined ? {} : { payUsdc }),
   };
 }
 
@@ -401,14 +417,21 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
     case 'request': {
       // Consumer: route ONE job to an authorized, capacity-green donor on the
       // pool. The consumer holds no consent grant — it is requesting capacity;
-      // the DONOR gates every job.
+      // the DONOR gates every job. A wallet is always armed so we CAN pay a
+      // priced donor (auto-reads its advertised price, or --pay overrides);
+      // sent payments are recorded to the payment ledger.
       const { startConsumer } = await import('./mesh.js');
-      const session = await startConsumer({ handle: cmd.handle, pool: cmd.pool });
+      const session = await startConsumer({
+        handle: cmd.handle,
+        pool: cmd.pool,
+        wallet: stubWallet(cmd.handle),
+        paymentLedger: createPaymentLedger(filePaymentStore(dir)),
+      });
       try {
-        const result = await session.request(
-          cmd.prompt,
-          cmd.timeoutMs === undefined ? {} : { timeoutMs: cmd.timeoutMs },
-        );
+        const result = await session.request(cmd.prompt, {
+          ...(cmd.timeoutMs === undefined ? {} : { timeoutMs: cmd.timeoutMs }),
+          ...(cmd.payUsdc === undefined ? {} : { payUsdc: cmd.payUsdc }),
+        });
         if (result === null) {
           process.stderr.write('vibedonate: no donor available on the pool\n');
           return 1;
