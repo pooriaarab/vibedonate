@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseArgs } from './cli.js';
+import { createPaymentLedger } from './index.js';
+import { parseArgs, renderWallet } from './cli.js';
 
 describe('parseArgs', () => {
   it('routes global flags', () => {
@@ -191,5 +192,38 @@ describe('parseArgs (request)', () => {
 
   it('surfaces pool validation errors from parsePool', () => {
     expect(() => parseArgs(['request', 'hi', '--pool', 'nonsense:foo'])).toThrow();
+  });
+});
+
+describe('parseArgs (wallet)', () => {
+  it('routes the wallet command', () => {
+    expect(parseArgs(['wallet'])).toEqual({ kind: 'wallet' });
+  });
+});
+
+describe('renderWallet', () => {
+  it('shows the address + an empty-state message when there are no payments', () => {
+    const out = renderWallet('0xabc', { received: 0, sent: 0, count: 0 }, []);
+    expect(out).toContain('0xabc');
+    expect(out).toContain('received 0 USDC');
+    expect(out).toContain('sent 0 USDC');
+    expect(out).toContain('no payments yet');
+  });
+
+  it('lists received + sent records with peer, amount, and txRef', () => {
+    const ledger = createPaymentLedger();
+    ledger.record({ peer: 'alice', amountUsdc: 0.5, direction: 'received', txRef: 'stub:a' });
+    ledger.record({ peer: 'donor1', amountUsdc: 0.25, direction: 'sent', txRef: 'stub:b' });
+
+    const out = renderWallet('0xabc', ledger.totals(), ledger.all());
+    expect(out).toContain('received 0.5 USDC');
+    expect(out).toContain('sent 0.25 USDC');
+    expect(out).toContain('alice');
+    expect(out).toContain('donor1');
+    expect(out).toContain('stub:a');
+    expect(out).toContain('stub:b');
+    // Every record line is present.
+    expect(out).toContain('#0');
+    expect(out).toContain('#1');
   });
 });
