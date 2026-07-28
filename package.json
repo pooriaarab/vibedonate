@@ -27,10 +27,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@pooriaarab/vibe-core": "^0.2.0"
+    "@pooriaarab/vibe-core": "^0.2.0",
+    "hyperswarm": "^4.17.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "hyperdht": "^6.33.0",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"
