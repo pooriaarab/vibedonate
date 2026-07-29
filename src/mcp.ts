@@ -22,6 +22,7 @@
  * stores (and a real on-device probe) over stdio.
  */
 
+import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -62,7 +63,18 @@ export interface McpServerHooks {
   readonly version?: string;
 }
 
-const SERVER_VERSION = '0.2.0';
+// Read from package.json at load so the MCP server version never drifts from the
+// published package (it was hardcoded '0.2.0' while the package shipped 0.4.0).
+const SERVER_VERSION: string = (() => {
+  try {
+    return (
+      (createRequire(import.meta.url)('../package.json') as { version?: string }).version ??
+      '0.0.0'
+    );
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 /**
  * Build the MCP server (no transport). Pure-ish: registers tools against the
