@@ -33,7 +33,8 @@
  * `donate:compute` grant (fast-fail), AND re-checks it per job so a mid-session
  * `stop` revokes instantly — mirroring vibedating's share:live caller gate.
  */
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+import { topicFor } from '@pooriaarab/vibe-core/ids';
 import type { Duplex } from 'node:stream';
 
 import {
@@ -87,7 +88,10 @@ export function poolTopicKey(pool: RecipientPool): string {
  * mechanism. Pure.
  */
 export function poolTopic(pool: RecipientPool): Buffer {
-  return createHash('sha256').update(`${TOPIC_PREFIX}${poolTopicKey(pool)}`, 'utf8').digest();
+  // Shared derivation (vibe-core/ids topicFor) — byte-identical to the raw
+  // sha256(prefix+key).digest() this used to compute, so live pool topics
+  // are unchanged. Namespace stays vibedonate's policy.
+  return topicFor(TOPIC_PREFIX, poolTopicKey(pool));
 }
 
 /* -------------------------------------------------------------------------- */
