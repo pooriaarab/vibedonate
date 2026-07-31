@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.pooriaarab/vibedonate",
+  "description": "BitTorrent-style mesh for AI inference across agentic CLIs. Local-first.",
+  "version": "0.4.2",
+  "repository": {
+    "url": "https://github.com/pooriaarab/vibedonate",
+    "source": "github",
+    "id": "1312340851"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "vibedonate",
+      "version": "0.4.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "npx",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "valueHint": "subcommand",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}
