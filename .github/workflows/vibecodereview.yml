@@ -7,7 +7,7 @@ concurrency:
   group: vibecodereview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 jobs:
-  review:
+  vibecodereview:
     # Only review the repo owner's own PRs (cost + injection guard on public repos).
     if: github.event.pull_request.user.login == github.repository_owner
     runs-on: ubuntu-latest
