@@ -3,11 +3,17 @@ on:
   pull_request:
   push:
     branches: [main]
+permissions:
+  contents: read
+
 jobs:
   oxlint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # bunx runs downloaded package code; keep the token out of .git/config.
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
-      - name: oxlint (agent budgets — warn-only, ratchet to error later)
+      - name: oxlint (agent budgets — enforced)
         run: bunx oxlint@^1 --config .oxlintrc.json
