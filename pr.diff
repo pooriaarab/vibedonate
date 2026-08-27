@@ -1,0 +1,44 @@
+diff --git a/.github/workflows/oxlint.yml b/.github/workflows/oxlint.yml
+new file mode 100644
+index 0000000..d9e1cea
+--- /dev/null
++++ b/.github/workflows/oxlint.yml
+@@ -0,0 +1,13 @@
++name: oxlint
++on:
++  pull_request:
++  push:
++    branches: [main]
++jobs:
++  oxlint:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: oven-sh/setup-bun@v2
++      - name: oxlint (agent budgets — warn-only, ratchet to error later)
++        run: bunx oxlint@^1 --config .oxlintrc.json
+diff --git a/.oxlintrc.json b/.oxlintrc.json
+new file mode 100644
+index 0000000..cac07eb
+--- /dev/null
++++ b/.oxlintrc.json
+@@ -0,0 +1,19 @@
++{
++  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
++  "plugins": ["typescript", "import", "unicorn", "oxc"],
++  "categories": { "correctness": "warn", "suspicious": "warn", "perf": "warn", "pedantic": "off", "style": "off", "restriction": "off", "nursery": "off" },
++  "rules": {
++    "complexity": ["warn", { "max": 10 }],
++    "max-lines": ["warn", { "max": 300, "skipBlankLines": true, "skipComments": true }],
++    "max-lines-per-function": ["warn", { "max": 50, "skipBlankLines": true, "skipComments": true }],
++    "max-params": ["warn", { "max": 4 }],
++    "max-depth": ["warn", { "max": 4 }],
++    "max-nested-callbacks": ["warn", { "max": 4 }],
++    "no-var": "warn", "prefer-const": "warn", "eqeqeq": "warn", "no-debugger": "warn",
++    "typescript/no-explicit-any": "warn", "typescript/no-non-null-assertion": "warn", "import/no-cycle": "warn"
++  },
++  "overrides": [
++    { "files": ["**/*.test.ts","**/*.test.tsx","**/*.spec.ts","**/*.spec.tsx","**/__tests__/**"], "rules": { "complexity":"off","max-lines":"off","max-lines-per-function":"off","max-depth":"off","max-nested-callbacks":"off","typescript/no-explicit-any":"off","typescript/no-non-null-assertion":"off" } },
++    { "files": ["scripts/**","**/scripts/**","**/*.config.*"], "rules": { "max-lines-per-function":"off","complexity":"off" } }
++  ]
++}
