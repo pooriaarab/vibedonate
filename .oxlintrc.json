@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
-  "plugins": ["typescript", "import", "unicorn", "oxc"],
+  "plugins": ["eslint", "typescript", "import", "unicorn", "oxc"],
   "categories": { "correctness": "warn", "suspicious": "warn", "perf": "warn", "pedantic": "off", "style": "off", "restriction": "off", "nursery": "off" },
   "rules": {
     "complexity": ["warn", { "max": 10 }],
