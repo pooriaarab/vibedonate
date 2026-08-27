@@ -31,15 +31,6 @@ function evaluateInternal(opts: EvaluateInternalOpts): CapacityDecision {
   return { decision: 'allow', reason: `ok — ${remaining - tokens} tokens remain after` };
 }
 
-export function evaluateCapacity(opts: EvaluateCapacityOpts | DonationConfig, ...rest: unknown[]): CapacityDecision {
-  if (rest.length > 0) {
-    const config = opts as unknown as DonationConfig;
-    const consent = rest[0] as ConsentLedger;
-    const peer = rest[1] as string;
-    const tokens = rest[2] as number;
-    const ctx = rest[3] as CapacityContext;
-    return evaluateInternal({ config, consent, peer, tokens, ctx });
-  }
-  const o = opts as EvaluateCapacityOpts;
-  return evaluateInternal({ config: o.config, consent: o.consent, peer: o.peer, tokens: o.tokens, ctx: o.ctx });
+export function evaluateCapacity(opts: EvaluateCapacityOpts): CapacityDecision {
+  return evaluateInternal(opts);
 }

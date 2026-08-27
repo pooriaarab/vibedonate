@@ -275,41 +275,41 @@ describe('evaluateCapacity (the shared gate)', () => {
   });
 
   it('allows when every condition is green', () => {
-    const v = evaluateCapacity(config(), granted(), 'alice', 100, ctx());
+    const v = evaluateCapacity({ config: config(), consent: granted(), peer: 'alice', tokens: 100, ctx: ctx() });
     expect(v.decision).toBe('allow');
     expect(v.reason).toMatch(/remain after/);
   });
   it('denies when stopped', () => {
-    expect(evaluateCapacity(config({ enabled: false }), granted(), 'alice', 100, ctx()).decision).toBe('deny');
+    expect(evaluateCapacity({ config: config({ enabled: false }), consent: granted(), peer: 'alice', tokens: 100, ctx: ctx() }).decision).toBe('deny');
   });
   it('denies without the consent grant', () => {
-    expect(evaluateCapacity(config(), createConsentLedger(), 'alice', 100, ctx()).decision).toBe('deny');
+    expect(evaluateCapacity({ config: config(), consent: createConsentLedger(), peer: 'alice', tokens: 100, ctx: ctx() }).decision).toBe('deny');
   });
   it('denies a peer not in the pool', () => {
-    expect(evaluateCapacity(config(), granted(), 'eve', 100, ctx()).decision).toBe('deny');
+    expect(evaluateCapacity({ config: config(), consent: granted(), peer: 'eve', tokens: 100, ctx: ctx() }).decision).toBe('deny');
   });
   it('denies when no on-device model is available', () => {
-    expect(evaluateCapacity(config(), granted(), 'alice', 100, ctx({ localAvailable: false })).decision).toBe('deny');
+    expect(evaluateCapacity({ config: config(), consent: granted(), peer: 'alice', tokens: 100, ctx: ctx({ localAvailable: false }) }).decision).toBe('deny');
   });
   it('denies while local activity is in progress', () => {
-    expect(evaluateCapacity(config(), granted(), 'alice', 100, ctx({ systemBusy: true })).decision).toBe('deny');
+    expect(evaluateCapacity({ config: config(), consent: granted(), peer: 'alice', tokens: 100, ctx: ctx({ systemBusy: true }) }).decision).toBe('deny');
   });
   it('denies outside the idle window', () => {
-    expect(evaluateCapacity(config(), granted(), 'alice', 100, ctx({ now: at(12, 0) })).decision).toBe('deny');
+    expect(evaluateCapacity({ config: config(), consent: granted(), peer: 'alice', tokens: 100, ctx: ctx({ now: at(12, 0) }) }).decision).toBe('deny');
   });
   it('denies when the daily cap is reached', () => {
     const c = config({ cap: 1_000 });
-    expect(evaluateCapacity(c, granted(), 'alice', 100, ctx({ donatedToday: 1_000 })).decision).toBe('deny');
+    expect(evaluateCapacity({ config: c, consent: granted(), peer: 'alice', tokens: 100, ctx: ctx({ donatedToday: 1_000 }) }).decision).toBe('deny');
   });
   it('denies when the request exceeds the remaining headroom', () => {
     const c = config({ cap: 1_000 });
-    const v = evaluateCapacity(c, granted(), 'alice', 500, ctx({ donatedToday: 600 }));
+    const v = evaluateCapacity({ config: c, consent: granted(), peer: 'alice', tokens: 500, ctx: ctx({ donatedToday: 600 }) });
     expect(v.decision).toBe('deny');
     expect(v.reason).toMatch(/400 tokens remain/);
   });
   it('checks in the documented precedence order (model before window)', () => {
     // No model AND outside window → the model reason wins (checked earlier).
-    const v = evaluateCapacity(config(), granted(), 'alice', 100, ctx({ localAvailable: false, now: at(12, 0) }));
+    const v = evaluateCapacity({ config: config(), consent: granted(), peer: 'alice', tokens: 100, ctx: ctx({ localAvailable: false, now: at(12, 0) }) });
     expect(v.reason).toMatch(/local chat model/);
   });
 });
