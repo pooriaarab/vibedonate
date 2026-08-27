@@ -56,17 +56,8 @@ function renderStatusInternal(opts: RenderStatusOpts): string {
   return `${lines.join('\n')}\n`;
 }
 
-export function renderStatus(opts: RenderStatusOpts, ...rest: unknown[]): string {
-  if (rest.length > 0) {
-    const config = opts as unknown as DonationConfig | null;
-    const donatedToday = rest[0] as number;
-    const totals = rest[1] as { donated: number; received: number; count: number };
-    const sharing = rest[2] as boolean;
-    const now = rest[3] as Date;
-    const localModel = rest[4] as ComputeResolution | null | undefined;
-    return renderStatusInternal({ config, donatedToday, totals, sharing, now, localModel });
-  }
-  return renderStatusInternal(opts as RenderStatusOpts);
+export function renderStatus(opts: RenderStatusOpts): string {
+  return renderStatusInternal(opts);
 }
 
 export function renderWallet(address: string, totals: PaymentTotals, records: readonly PaymentRecord[], chain?: string): string {

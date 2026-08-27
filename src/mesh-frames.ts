@@ -143,8 +143,6 @@ export function parseFrame(raw: string | Buffer): Frame | null {
   return fn ? fn(r) : null;
 }
 
-export function parsePaymentProofFieldExport(raw: unknown): PaymentProof | null { return parsePaymentProofField(raw); }
-
 function serializeHello(f: Extract<Frame, { t: 'hello' }>): string {
   const base: Record<string, unknown> = { t: 'hello', handle: f.handle, pool: f.pool, capacityTier: f.capacityTier };
   if (typeof f.priceUsdc === 'number' && f.priceUsdc > 0) {
