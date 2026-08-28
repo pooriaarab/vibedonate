@@ -9,9 +9,17 @@ permissions:
   contents: read
   pull-requests: read
 
+# A second push to a PR makes the in-flight scan's result worthless, but the
+# runner keeps working on it anyway. Cancel the superseded run instead.
+#
+# The cancellation is gated on pull_request: gitleaks scans full commit
+# history, so a cancelled push-triggered run leaves a commit unscanned with
+# no failure or warning. A PR run is safe to cancel — the next push re-scans
+# the same head. github.workflow is in the group so two workflows on the
+# same ref can't cancel each other.
 concurrency:
-  group: secret-scanning-${{ github.ref }}
-  cancel-in-progress: true
+  group: secret-scanning-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gitleaks:
