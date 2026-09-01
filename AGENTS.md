@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## Brand and design context
+
+Read `.agents/brand.md` before changing public copy or documentation.
+
+Read `.agents/design.md` before changing CLI output, prototypes, or launch media.
+
 <!-- pr-standards:start -->
 
 ## Pull requests
