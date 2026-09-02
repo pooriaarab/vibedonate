@@ -13,12 +13,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      actions: read
       contents: write
       pull-requests: write
       id-token: write
     steps:
       - uses: pooriaarab/vibecodereview@v1
         with:
+          max_council_runs: 3
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_code_oauth_token_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
           github_token: ${{ github.token }}
