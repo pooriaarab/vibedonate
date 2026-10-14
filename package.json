@@ -1,7 +1,7 @@
 {
   "name": "vibedonate",
   "version": "0.4.3",
-  "description": "BitTorrent-style mesh for AI inference — donate spare local compute across agentic CLIs. Opt-in, metered, your hardware. Local-first. v0: local-compute node + metering + allow-list.",
+  "description": "Experimental local compute-sharing CLI with Hyperswarm transport, Ollama availability checks, MCP capacity tools, and metering.",
   "type": "module",
   "license": "MIT",
   "author": "Pooria Arab",
@@ -46,16 +46,17 @@
     "url": "https://github.com/pooriaarab/vibedonate/issues"
   },
   "keywords": [
-    "vibe-suite",
     "vibedonate",
-    "claude-code",
-    "codex",
-    "agentic",
-    "cli",
-    "mcp",
+    "vibe-suite",
+    "local-compute",
     "inference",
-    "mesh",
-    "local-first"
+    "ollama",
+    "hyperswarm",
+    "mcp",
+    "peer-to-peer",
+    "consent",
+    "metering",
+    "nodejs"
   ],
   "publishConfig": {
     "access": "public"
