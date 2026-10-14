@@ -56,8 +56,6 @@
     "peer-to-peer",
     "consent",
     "metering",
-    "usdc",
-    "x402",
     "nodejs"
   ],
   "publishConfig": {
