@@ -22,7 +22,7 @@ Requires Node.js 18 or later. Includes TypeScript declarations and three direct 
 vibedonate status
 ```
 
-On a fresh installation, the output reports an unconfigured node and local model availability.
+On a fresh installation, the output reports that the node is not armed.
 No credentials or environment variables are required. No sharing starts from this command.
 The CLI reads exported environment variables; it does not load `.env` files.
 
