@@ -1,6 +1,6 @@
 {
   "name": "vibedonate",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Experimental local compute-sharing CLI with Hyperswarm transport, Ollama availability checks, MCP capacity tools, and metering.",
   "type": "module",
   "license": "MIT",
