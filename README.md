@@ -146,7 +146,7 @@ Hash chains detect inconsistent record content; they do not prevent someone from
 
 - Ollama runner: install Ollama and pull `qwen2.5:7b`; set `VIBEDONATE_OLLAMA_MODEL` to choose another installed model.
 - Separate state: export `VIBEDONATE_DIR` to override `~/.vibedonate`.
-- Restricted demo pool: use the same `allowlist:consumer` string on both peers and `--handle consumer` for requests.
+- Demo pool (not access control): use the same `allowlist:consumer` string on both peers and `--handle consumer` for requests. Any peer that announces a matching handle passes the check.
 - Organization pool: include explicit members, such as `org:team,alice`; `org:team` alone authorizes no members.
 - Agent setup: configure your MCP host to launch `vibedonate mcp` over stdio.
 
