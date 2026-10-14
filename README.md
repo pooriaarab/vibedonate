@@ -1,162 +1,196 @@
 # vibedonate
 
-BitTorrent-style mesh for AI inference — donate spare **local compute** across Claude, Codex, Gemini, Grok, pi. Your hardware, opt-in, metered.
+[![npm version](https://img.shields.io/npm/v/vibedonate)](https://www.npmjs.com/package/vibedonate) [![Downloads/month](https://img.shields.io/npm/dm/vibedonate)](https://www.npmjs.com/package/vibedonate) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://opensource.org/license/mit)
 
-Part of the **Vibe Suite** — companion tools for agentic coding CLIs (Claude Code, Codex, Gemini, Grok/pi, Kimi). Ships as **CLI + npm package + MCP server**.
+[Package](https://www.npmjs.com/package/vibedonate) · [Setup](#install) · [Runtime surfaces](#runtime-surfaces) · [Compare](#compare)
 
-**Local-first: runs on your own machine, no data out** (consent model in `@pooriaarab/vibe-core`).
-
-> **v0 = the local-compute tier only.** This release donates spare compute from a model on *your* machine, metered against a daily token cap and scoped to an allow-list. Routing a stranger's inference through your logged-in subscription or API key is a *different trust surface* and needs trust/legal design first (see [`docs/spec.md`](docs/spec.md) §"Open questions"). It is deliberately **not** in v0.
+vibedonate is an open-source, self-hosted compute-sharing experiment for developers who use coding agents.
+Your hardware, opt-in, metered. It provides peer transport, donation controls, and local ledgers in the Vibe Suite.
+The current CLI mesh runs an echo stub; its separate Ollama runner is not connected to mesh jobs.
 
 ## Install
 
 ```bash
-# use it
-npx vibedonate share --compute --idle 22:00-07:00 --cap 2M --pool allowlist:alice,bob
-
-# or install globally
 npm install -g vibedonate
+```
+
+Requires Node.js 18 or later. Includes TypeScript declarations and three direct runtime dependencies.
+
+## Run your first local check
+
+```bash
 vibedonate status
 ```
 
-As a library:
+On a fresh installation, the output reports an unconfigured node and local model availability.
+No credentials or environment variables are required. No sharing starts from this command.
+The CLI reads exported environment variables; it does not load `.env` files.
+
+For an opt-in transport demo, run this donor in one terminal:
 
 ```bash
-npm install vibedonate
+vibedonate share --compute --idle 00:00-23:59 --cap 2M --pool allowlist:consumer --handle donor
 ```
 
-## Quick start (CLI)
+Run the consumer in another terminal:
 
 ```bash
-# Arm donation: local compute, 22:00–07:00 UTC, 2M tokens/day, only alice & bob.
-vibedonate share --compute --idle 22:00-07:00 --cap 2000000 --pool allowlist:alice,bob
+vibedonate request "hello" --pool allowlist:consumer --handle consumer
 ```
 
-```
-vibedonate — enabled · ● your machine · opt-in
-  tier:     compute
-  idle:     22:00-07:00 (UTC)
-  cap:      2,000,000 tokens/day
-  pool:     allowlist [alice, bob]
-  usage:    donated 0 (today 0) · received 0 · 0 receipt(s)
-  sharing:  yes (now 2026-07-26T03:17:55Z)
-```
+With reachable peers inside the UTC window, the consumer prints `olleh`. This is the echo stub, not AI inference.
+Stop the donor with Ctrl+C, then run `vibedonate stop` to revoke persisted consent.
 
-```bash
-vibedonate status      # config + metering totals + whether sharing right now
-vibedonate stop        # disable (revokes the donate:compute consent grant)
-vibedonate mcp         # run the MCP server over stdio
-vibedonate --version
-vibedonate --help
+## How it works
+
+```text
+share -> saved config + consent -> Hyperswarm pool discovery
+                                      |
+consumer prompt -> donor checks -> echo stub -> result + metering receipt
+
+status / MCP preflight -> separate Ollama availability check
+payment flags -> stub wallet + local payment ledger
 ```
 
-State lives in `$VIBEDONATE_DIR` (default `~/.vibedonate`): `config.json`, `consent.json`, `metering.json`. Nothing leaves your machine.
+Announcements contain handle, pool, compute tier, and optional payment terms. Prompts and results cross connected peer links.
+Raw usage totals are not announced. Local files default to `~/.vibedonate`.
 
-### `--pool`
+## Why it exists
 
-| Value | Who can receive |
-|-------|-----------------|
-| `open` | any peer (you opted into the open pool) |
-| `org:acme` or `org:acme,alice,bob` | a named group; trailing ids are its member allow-list |
-| `allowlist:alice,bob` | an explicit peer-id list |
+vibedonate explores opt-in donation controls around spare local compute.
+Petals distributes model execution; Ray Serve provides model-serving infrastructure.
+This package focuses on consent, schedules, recipient pools, and metering, with experimental peer transport.
 
-### `--cap`
+## Compare
 
-A bare integer (`2000000`) or shorthand (`2M`, `500k`). Scoped to the UTC day of each receipt.
+Checked 2026-10-14 against the [Petals research paper](https://arxiv.org/abs/2209.01188) and [Ray Serve documentation](https://docs.ray.io/en/latest/serve/llm/index.html).
 
-## Quick start (library)
+| Property | vibedonate | Petals | Ray Serve |
+| --- | --- | --- | --- |
+| Scope | Donation controls and echo mesh demo | Collaborative model inference and fine-tuning | Distributed model serving |
+| Execution | Default mesh uses echo stub | Distributed model blocks | Deployed model-serving applications |
+| Interface | Node.js library, CLI, agent preflight | Model inference interface | Python deployment and inference APIs |
 
-```ts
-import {
-  createDonationConfig,
-  isSharingActive,
-  createMeteringLedger,
-  authorizePeer,
-  DONATE_COMPUTE_SCOPE,
-  resolveCompute,        // cascade-backed on-device model resolution
-  evaluateCapacity,      // the shared gate (MCP + mesh runtime)
-  createLocalMeshRuntime,// serves a request + commits a receipt
-  createDonationHooks,   // lifecycle events into the suite notify channel
-  createConsentLedger, // from @pooriaarab/vibe-core, re-exported
-} from 'vibedonate';
+## Coverage
 
-const config = createDonationConfig({
-  idle: '22:00-07:00',      // wraps midnight
-  cap: '2M',                // 2,000,000 tokens/day
-  pool: 'allowlist:alice,bob',
-});
+| Integration or tier | Status | Source behavior |
+| --- | --- | --- |
+| Hyperswarm | Implemented | Same-pool peer discovery and request/result transport |
+| Ollama | Separate runner | Detects executable; invokes `ollama run`; not wired to mesh CLI |
+| Echo mesh model | Stub | Reverses prompts; records 100 tokens per default job |
+| USDC / x402-style payments | Stub | Deterministic wallet proofs and local ledger; no settlement |
+| Base | Scaffold | Accepted payment chain label |
+| Ethereum | Scaffold | Accepted payment chain label |
+| Polygon | Scaffold | Accepted payment chain label |
+| Subscription sharing | — | No shipped tier |
+| API-credit routing | — | No shipped tier |
 
-const now = new Date();
-const ledger = createMeteringLedger();       // in-memory; pass a store to persist
-const consent = createConsentLedger();
-consent.grant(DONATE_COMPUTE_SCOPE);          // arm donation
+There is one default chat runner, one default echo mesh model, and two MCP tools.
+Source inspection and local tests support these distinctions. No credentials, on-chain transactions, or public-network service guarantees were verified.
 
-// The schedule boolean: enabled AND not busy AND under cap AND inside the window.
-const active = isSharingActive(config, now, /* systemBusy */ false, ledger.totals(now).donatedToday);
+## Common use cases
 
-// What "donate local compute" actually means: is there an on-device model to
-// serve with? Resolved through vibe-core's cascade with egress forbidden, so it
-// provably never leaves your machine (Ollama by default).
-const compute = await resolveCompute();
+1. Node.js developers: test consent and capacity decisions through the exported library.
+2. Hyperswarm experimenters: exchange echo jobs between same-pool peers.
+3. Ollama users: inspect local chat-runner availability before building a custom integration.
+4. Agent builders: call MCP `request_capacity` to check a proposed donation without executing a job.
+5. Vibe Suite users: inspect hash-chained usage and payment records on their own machine.
 
-// The shared gate both the MCP pre-flight and the mesh runtime consult.
-// Adds consent, peer auth, and on-device availability to the schedule check.
-const verdict = evaluateCapacity(config, consent, 'alice', 500, {
-  now,
-  systemBusy: false,
-  donatedToday: ledger.totals(now).donatedToday,
-  localAvailable: compute.available,
-}); // { decision: 'allow' | 'deny', reason }
+## Features
 
-// The runtime: on allow it commits a real, hash-chained receipt. The P2P
-// transport that feeds it remote requests is the one seam still to land.
-const mesh = createLocalMeshRuntime({
-  config: () => config,
-  consent: () => consent,
-  ledger: () => ledger,
-  now: () => new Date(),
-  systemBusy: () => false,
-  resolveLocal: () => resolveCompute(),
-});
-await mesh.serve({ peer: 'alice', tokens: 500 });
+- **Consent:** `share` grants `donate:compute`; `stop` revokes it in persisted storage.
+- **Schedules:** UTC idle windows and configurable daily token caps.
+- **Recipient pools:** `open`, `org:<id>,<member>`, and `allowlist:<peers>`.
+- **Metering:** local hash-chained receipts with a chain verification method.
+- **Payments:** optional price metadata and stub payment records; free jobs by default.
+- **Suite hooks:** exported donation lifecycle hooks use vibe-core events and notifications.
+
+## Runtime surfaces
+
+The Node.js package exports configuration parsers, consent helpers, capacity evaluation, metering, payment stubs, and compute resolution.
+
+```text
+vibedonate share --compute --idle HH:MM-HH:MM --cap 2M --pool open
+  [--handle name] [--price 0.001] [--chain base|ethereum|polygon]
+vibedonate request "prompt" --pool open
+  [--handle name] [--timeout milliseconds] [--pay 0.001]
+vibedonate status
+vibedonate stop
+vibedonate wallet
+vibedonate mcp
+vibedonate --help / -h
+vibedonate --version / -v
 ```
 
-Every function is **pure and injectable**: `now`, `systemBusy`, the metering store, and the consent ledger are all passed in — which is what makes the gating logic unit-testable to exhaustion.
+`vibedonate mcp` starts a stdio Model Context Protocol (MCP) server with exactly two tools:
 
-## MCP server
+| Tool | Behavior |
+| --- | --- |
+| `status` | Config, consent, compute availability, schedule state, and totals |
+| `request_capacity` | Preflight `{ peer, tokens }`; returns an allow/deny decision without inference or a receipt |
 
-`vibedonate mcp` runs an stdio MCP server with two tools:
+## Delivery and behavior limits
 
-| Tool | Args | Returns |
-|------|------|---------|
-| `status` | — | config, metering totals, and whether the node is sharing *now* |
-| `request_capacity` | `{ peer, tokens }` | `allow`/`deny` + reason |
+The CLI donor defaults to `createEchoModel()`. Installing Ollama does not replace it with model inference.
+The separate local runtime records capacity receipts; it does not execute a prompt.
+The CLI uses `stubWallet()`. Payment success means a synthetic proof passed, not that USDC moved on Base, Ethereum, or Polygon.
+Peer authorization compares announced handles. It does not authenticate organization membership or bind handles to trusted identities.
+CLI activity checks default to “not busy”; no automatic machine-idle detector is wired into the donor.
+The running donor holds its initial config and consent objects. Use Ctrl+C to stop it; a separate `stop` process does not close it.
+The mesh checks whether today's total is below the cap before a job; a job can exceed the remaining allowance.
+The capacity preflight has a stricter request-fits check. Do not assume both paths enforce identical bounds.
+Discovery defaults to 15 seconds; each attempted donor gets up to six seconds. Total elapsed time can exceed the discovery timeout.
+Hash chains detect inconsistent record content; they do not prevent someone from rewriting the whole local ledger.
 
-`request_capacity` is a **pre-flight** — it checks the `donate:compute` consent grant, peer authorization, **on-device compute availability** (resolved through vibe-core's cascade, egress forbidden), the idle window, local activity, and the daily cap, then answers. It does not consume capacity (recording real usage is the runtime half of the mesh, landing after v0). An agent running low on quota can ask the mesh for capacity behind your consent.
+## Integration guides
 
-## How it gates
-
-Two functions, one truth:
-
-- **`isSharingActive(config, now, systemBusy, donatedToday)`** — the schedule boolean. `true` **iff** the donation is `enabled`, the machine is not busy, today's donated tokens are under `cap`, and `now` is inside the idle window. Use this for "are we in a sharing state right now?" (status, dashboards).
-- **`evaluateCapacity(config, consent, peer, tokens, ctx)`** — the full request gate, shared by `request_capacity` (MCP, no commit) and `createLocalMeshRuntime().serve()` (runtime, commits a receipt). Checks in order: `enabled` → consent grant → peer authorization → **on-device compute available** → not busy → idle window → daily cap → request fits remaining. One definition, consulted everywhere.
-
-The on-device compute check is real: `resolveCompute()` runs the request through vibe-core's **model-preference cascade** with `allowEgress:false`, so only the on-device (`local`) tier is ever eligible — donated compute provably never leaves your machine. vibedonate ships an Ollama-backed `chat` runner (set `VIBEDONATE_OLLAMA_MODEL`); other runners drop into `defaultChatRunners()` as they land.
-
-Metering receipts form a sha-256 **hash-chain** (`seq → prev → hash`); `ledger.verify()` detects any mutation, drop, or reorder — a local tamper-evident ledger, as the spec calls for. `createLocalMeshRuntime().serve()` is what actually appends to it, so the ledger is exercised (not write-only).
-
-### The one seam still to land
-
-The **P2P transport** — carrying a remote peer's request to this node and the donor's inference back (encrypted peer-to-peer payload, relay only for discovery/NAT). `MeshRuntime` defines that seam; `createLocalMeshRuntime` implements everything *except* the transport, so a real request can be served and metered locally today, and the network layer plugs in later. See [`docs/spec.md`](docs/spec.md) §"Routing" / §"Open questions".
-
-### Suite events
-
-`share` / `stop` / `serve` / `deny` publish normalized `VibeEvent`s to the local notify channel (`~/.vibe/notify.jsonl`) via vibe-core's **hooks bus**, and a `session-end` milestone from any harness cleanly stops donation — so vibedonate is a first-class participant in the suite, not an island.
-
-## Prototype
-
-Interactive, self-contained UX prototype (no build, no network): open [`docs/prototype.html`](docs/prototype.html) in a browser.
+- Ollama runner: install Ollama and pull `qwen2.5:7b`; set `VIBEDONATE_OLLAMA_MODEL` to choose another installed model.
+- Separate state: export `VIBEDONATE_DIR` to override `~/.vibedonate`.
+- Restricted demo pool: use the same `allowlist:consumer` string on both peers and `--handle consumer` for requests.
+- Organization pool: include explicit members, such as `org:team,alice`; `org:team` alone authorizes no members.
+- Agent setup: configure your MCP host to launch `vibedonate mcp` over stdio.
 
 ## Status
 
-Prototype + spec + **v0 implementation** (local-compute tier). v0.2 makes "donate local compute" real: an on-device model is resolved through vibe-core's cascade (egress forbidden), the shared capacity gate is factored into one function, the mesh runtime actually commits hash-chained receipts, and donation lifecycle publishes to the suite notify channel. Account/credit-routing tiers need trust/legal design, and the P2P transport is the one seam still to land — see [`docs/spec.md`](docs/spec.md).
+Version 0.4.3 is experimental and pre-1.0. Public case studies are not yet published.
+No public documentation site is configured; the operational guidance is self-contained here.
+Use [GitHub issues](https://github.com/pooriaarab/vibedonate/issues) for support; repository access may be required.
+For contributions, run `npm ci`, `npm run typecheck`, `npm run build`, and `npm test`.
+
+## FAQ
+
+### Which integrations are verified?
+
+vibedonate has source-backed peer transport and a separate Ollama runner. Local tests do not certify public peers or blockchain settlement.
+
+### Does vibedonate provide a managed inference service?
+
+vibedonate runs on your hardware. It provides no managed inference pool, availability guarantee, or hosted account service.
+
+### Does the CLI run Ollama for donated jobs?
+
+vibedonate uses an echo stub for default CLI mesh jobs. The Ollama chat runner exists as a separate library path.
+
+### How is vibedonate different from Petals?
+
+vibedonate experiments with donation controls and a request/result mesh. Petals distributes model execution across participants.
+
+### How is vibedonate different from Ray Serve?
+
+vibedonate supplies local donation controls and a CLI experiment. Ray Serve supplies infrastructure for deployed model-serving applications.
+
+### Can I earn real USDC with vibedonate?
+
+vibedonate ships a stub wallet and local payment records. The CLI does not submit or verify real blockchain payments.
+
+### Does stop terminate an active donor?
+
+vibedonate stop changes persisted config and consent. Stop the active donor process with Ctrl+C to leave the mesh.
+
+### Does vibedonate share subscription quotas or API credits?
+
+vibedonate ships only the compute tier. Subscription and API-credit routing are not implemented.
+
+## License
+
+MIT.
